@@ -1,5 +1,7 @@
 # market-watch
 
+[English](README.md) | [中文](README_zh.md)
+
 **Real-time market monitoring and alert system for OpenClaw agents.**
 
 Watch crypto prices (BTC, ETH, SOL, HYPE, XAUT, and more) and Chinese A-shares via live WebSocket feeds and TCP polling. When a price condition is met, the agent gets notified and proactively contacts the user.
@@ -24,9 +26,7 @@ Watch crypto prices (BTC, ETH, SOL, HYPE, XAUT, and more) and Chinese A-shares v
 ### 1. Install Python dependency
 
 ```bash
-pip3 install requests
-# Optional: for A-share (China stocks) support
-pip3 install pytdx
+pip3 install requests pytdx
 ```
 
 ### 2. Register a price alert
@@ -234,7 +234,7 @@ This skill ships with a `SKILL.md` that is automatically loaded by the OpenClaw 
 
 - Python 3.10+
 - `requests` (`pip3 install requests`)
-- `pytdx` for A-share support (`pip3 install pytdx`) — optional
+- `pytdx` (`pip3 install pytdx`) — A-share real-time quotes
 - [OpenClaw](https://github.com/openclaw) agent runtime (for `openclaw agent --deliver`)
 - macOS or Linux (launchd watchdog is macOS-only; Linux users can use `cron` instead)
 
