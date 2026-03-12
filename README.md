@@ -12,6 +12,39 @@ Exchange symbol maps are fetched automatically at startup and refreshed hourly �
 
 ---
 
+## Example: From Chat to Live Alert in 30 Seconds
+
+You tell your agent:
+
+> "ETH is approaching my target. Alert me when it hits $2,150 — I want to sell 3.5 ETH and rotate into HYPE."
+
+Behind the scenes, your agent:
+
+1. **Registers** a price alert: `ETH >= $2,150`
+2. **Starts** the monitoring daemon (if not already running)
+3. **Confirms** back: *"Got it. I'll notify you when ETH reaches $2,150."*
+
+The daemon polls Binance every 60 seconds. Hours later, ETH touches $2,152:
+
+```
+🔔 MARKET_ALERT triggered
+
+Asset:     ETH
+Condition: >= $2,150
+Current:   $2,152.30 (source: binance)
+Context:   Sell 3.5 ETH and rotate into HYPE
+```
+
+Your agent wakes up, reads the context, and messages you:
+
+> "ETH just hit $2,152. Per your plan — time to sell 3.5 ETH on OKX and rotate ~$4K into HYPE. Want me to walk you through the execution?"
+
+**No dashboards. No browser tabs. Your agent watches the market so you don't have to.**
+
+The same pattern works for news — set keywords like `"SEC, crypto, regulation"` and the agent will monitor Jin10, Wallstreetcn, and major crypto RSS feeds every 5 minutes, alerting you only when something matches.
+
+---
+
 ## What It Does
 
 | Feature | Status |
