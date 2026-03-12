@@ -356,21 +356,23 @@ SOURCE_DISPLAY = {
 def fire_news_alert(alert: dict, item: dict, matched_keywords: list[str]) -> None:
     ts          = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     source_name = SOURCE_DISPLAY.get(item["source"], item["source"])
+    content     = item.get("content", "").strip()
+    link        = item.get("link", "")
 
     msg = (
-        f"[NEWS_ALERT 触发 · 请处理后联系用户]\n\n"
+        f"[NEWS_ALERT 触发 · 需要你判断]\n\n"
         f"命中关键词：{', '.join(matched_keywords)}\n"
         f"来源：{source_name}\n"
         f"标题：{item['title'][:200]}\n"
+        f"{'链接：' + link if link else ''}\n"
         f"触发时间：{ts}\n\n"
-        f"背景（设盘时记录）：\n{alert.get('context_summary', '（未记录）')}\n\n"
-        f"完整上下文：\n"
-        f"  文件：{alert.get('transcript_file', '未记录')}\n"
-        f"  消息ID：{alert.get('transcript_msg_id', '未记录')}\n\n"
+        f"{'正文内容：' + chr(10) + content[:2000] + chr(10) if content else ''}\n"
+        f"设盘背景：\n{alert.get('context_summary', '（未记录）')}\n\n"
         f"你的任务：\n"
-        f"1. 阅读背景，结合新闻内容判断是否需要行动\n"
-        f"2. 以自己的口吻主动告知用户：检测到相关新闻\n"
-        f"3. 结合当前市场给出简要判断或建议，询问是否需要操作"
+        f"1. 阅读完整新闻内容，结合设盘背景判断：这条新闻是否真的跟用户关心的事相关？\n"
+        f"2. 关键词匹配只是粗筛，你需要做精筛——如果内容无关或重要性不足，忽略即可，不要打扰用户\n"
+        f"3. 如果确实相关且重要：联系用户，附上你的分析和建议\n"
+        f"4. 如果拿不准：宁可不发，避免噪音"
     )
 
     log.info(f"🔔 NEWS_ALERT: [{item['source']}] {item['title'][:60]} | kw={matched_keywords}")
@@ -394,19 +396,31 @@ def fire_news_alert_batch(
     if len(matches) > 10:
         items_text += f"... 还有 {len(matches) - 10} 条\n"
 
+    # 批量通知也附带每条新闻的正文摘要
+    details_text = ""
+    for i, (item, matched) in enumerate(matches[:10], 1):
+        source_name = SOURCE_DISPLAY.get(item["source"], item["source"])
+        content = item.get("content", "").strip()
+        link = item.get("link", "")
+        details_text += f"\n--- [{i}] [{source_name}] {item['title'][:150]} ---\n"
+        if link:
+            details_text += f"链接：{link}\n"
+        if content:
+            details_text += f"{content[:500]}\n"
+    if len(matches) > 10:
+        details_text += f"\n... 还有 {len(matches) - 10} 条未展示\n"
+
     msg = (
-        f"[NEWS_ALERT 触发 · 本轮 {len(matches)} 条命中 · 请处理后联系用户]\n\n"
+        f"[NEWS_ALERT 触发 · 本轮 {len(matches)} 条命中 · 需要你判断]\n\n"
         f"命中关键词：{', '.join(all_keywords)}\n"
         f"触发时间：{ts}\n\n"
-        f"命中新闻列表：\n{items_text}\n"
-        f"背景（设盘时记录）：\n{alert.get('context_summary', '（未记录）')}\n\n"
-        f"完整上下文：\n"
-        f"  文件：{alert.get('transcript_file', '未记录')}\n"
-        f"  消息ID：{alert.get('transcript_msg_id', '未记录')}\n\n"
+        f"命中新闻：\n{details_text}\n\n"
+        f"设盘背景：\n{alert.get('context_summary', '（未记录）')}\n\n"
         f"你的任务：\n"
-        f"1. 阅读背景，结合以上新闻内容判断是否需要行动\n"
-        f"2. 以自己的口吻主动告知用户：检测到多条相关新闻\n"
-        f"3. 结合当前市场给出简要判断或建议，询问是否需要操作"
+        f"1. 逐条阅读以上新闻内容，结合设盘背景判断：哪些是真正相关的？哪些只是关键词碰巧命中的噪音？\n"
+        f"2. 只把确实重要且相关的新闻告知用户，附上你的分析\n"
+        f"3. 噪音直接过滤掉，不要打扰用户\n"
+        f"4. 如果全部都是噪音 → 不联系用户"
     )
 
     log.info(

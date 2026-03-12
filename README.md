@@ -12,36 +12,29 @@ Exchange symbol maps are fetched automatically at startup and refreshed hourly �
 
 ---
 
-## Example: From Chat to Live Alert in 30 Seconds
+## See It in Action
+
+**Tuesday, 11 PM.** You're about to call it a night, but ETH has been creeping up all day. You've been planning to take profit at $2,150 and rotate into HYPE. You don't want to stay up staring at charts.
 
 You tell your agent:
 
-> "ETH is approaching my target. Alert me when it hits $2,150 — I want to sell 3.5 ETH and rotate into HYPE."
+> "Watch ETH for me. When it crosses $2,150, wake me up — I'm selling 3.5 ETH and putting $7,500 into HYPE."
 
-Behind the scenes, your agent:
+Your agent registers the alert and the daemon starts polling Binance in the background. You go to sleep.
 
-1. **Registers** a price alert: `ETH >= $2,150`
-2. **Starts** the monitoring daemon (if not already running)
-3. **Confirms** back: *"Got it. I'll notify you when ETH reaches $2,150."*
+**Wednesday, 3:47 AM.** ETH spikes to $2,163 during an Asian session rally. The daemon catches it instantly. Your agent wakes up, reads the context you set 5 hours ago, and pings you on Feishu:
 
-The daemon polls Binance every 60 seconds. Hours later, ETH touches $2,152:
+> "ETH just broke $2,163. Time to sell your 3.5 ETH — that's ~$7,570 at current price. Want to rotate all of it into HYPE, or split between HYPE and BTC?"
 
-```
-🔔 MARKET_ALERT triggered
+You pick up your phone, see the message, and execute the trade before the price fades. No chart-watching. No missed moves.
 
-Asset:     ETH
-Condition: >= $2,150
-Current:   $2,152.30 (source: binance)
-Context:   Sell 3.5 ETH and rotate into HYPE
-```
+---
 
-Your agent wakes up, reads the context, and messages you:
+**Same idea, different signal.** It's not just prices — you can watch for news too.
 
-> "ETH just hit $2,152. Per your plan — time to sell 3.5 ETH on OKX and rotate ~$4K into HYPE. Want me to walk you through the execution?"
+> "Monitor for any SEC announcements about crypto ETFs. Check Jin10 and CoinDesk."
 
-**No dashboards. No browser tabs. Your agent watches the market so you don't have to.**
-
-The same pattern works for news — set keywords like `"SEC, crypto, regulation"` and the agent will monitor Jin10, Wallstreetcn, and major crypto RSS feeds every 5 minutes, alerting you only when something matches.
+Five minutes later, a Jin10 flash hits: *"SEC Commissioner signals openness to spot ETH ETF approval."* Your agent catches the keyword match, reads the full headline, and messages you with context — before crypto Twitter even picks it up.
 
 ---
 

@@ -660,12 +660,14 @@ def run(agent_id: str, alerts_file: Path):
             last_cleanup = now
             _cleanup_old_alerts(alerts_file)
 
-        # ── 定期日志 ──
+        # ── 定期日志（只显示有活跃警报的资产，固定60秒间隔对齐）──
         if now - last_log >= 60:
-            last_log = now
+            last_log += 60  # 对齐到上一个60秒刻度，避免累积漂移
+            watched_assets = {a["asset"].upper() for a in active}
             snap = " | ".join(
-                f"{a}=${p[0]:,.4g}[{p[1]}] age={int(now-p[2])}s"
+                f"{a}=${p[0]:,.4g}[{p[1]}]"
                 for a, p in sorted(prices.items())
+                if a in watched_assets
             )
             log.info(f"Prices: {snap or '(无数据)'}")
             log.info(f"Active: {len(active)} alerts")
