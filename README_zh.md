@@ -4,7 +4,9 @@
 
 **给 OpenClaw agent 用的实时行情监控与警报系统。**
 
-通过 HTTP 轮询监控加密货币价格（BTC、ETH、SOL、HYPE、XAUT 等）和 A 股行情，同时监控金十数据、华尔街见闻、CoinDesk、CoinTelegraph、The Block、Decrypt 等新闻源的关键词命中。当价格触达条件或新闻命中关键词时，自动通知 agent，由 agent 主动联系用户。
+通过 HTTP 轮询监控任意 USDT 交易对加密货币价格和 A 股行情，同时监控金十数据、华尔街见闻、CoinDesk、CoinTelegraph、The Block、Decrypt 等新闻源的关键词命中。当价格触达条件或新闻命中关键词时，自动通知 agent，由 agent 主动联系用户。
+
+交易所 symbol 映射在启动时自动从各交易所公开 API 拉取，每小时刷新一次。任意 USDT 交易对的加密货币均自动支持，无需手动添加 symbol 映射或重启 daemon。
 
 > 这是一个 [OpenClaw](https://github.com/openclaw) AgentSkill，任何 OpenClaw agent 即插即用。
 
@@ -115,15 +117,17 @@ bash "$HOME/.openclaw/skills/market-watch/scripts/install-watchdog.sh" install -
 
 | 交易所 | 协议 | 支持资产 | 延迟 |
 |--------|------|---------|------|
-| Binance | HTTP ticker（5s 轮询） | BTC, ETH, SOL, BNB | ~100ms |
-| Hyperliquid | HTTP allMids（5s 轮询） | HYPE + 全部 HL 上线资产 | ~100ms |
-| OKX | HTTP ticker（5s 轮询） | BTC, ETH, SOL, XAUT, HYPE | ~100ms |
-| Bitget | HTTP ticker（5s 轮询） | BTC, ETH, SOL, HYPE | ~100ms |
-| CoinGecko | HTTP 轮询（30s 兜底） | 全资产 fallback | ~30s |
+| Binance | HTTP ticker（5s 轮询） | 全部 USDT 交易对（动态发现） | ~100ms |
+| Hyperliquid | HTTP allMids（5s 轮询） | 全部 HL 上线资产（动态发现） | ~100ms |
+| OKX | HTTP ticker（5s 轮询） | 全部 USDT SPOT（动态发现） | ~100ms |
+| Bitget | HTTP ticker（5s 轮询） | 全部 USDT SPOT（动态发现） | ~100ms |
+| CoinGecko | HTTP 轮询（30s 兜底） | 全资产 fallback（动态发现） | ~30s |
 | pytdx | TCP 请求-响应 | A 股（沪深） | ~200ms |
 
-**取价优先级（逐级降级）：**
-- BTC / ETH / SOL：Binance → Hyperliquid → OKX → Bitget → CoinGecko
+**动态 symbol 发现：** 启动时自动从各交易所公开 API 拉取完整交易对列表，每小时刷新。无硬编码 symbol 表，任何 USDT 交易对的币种即开即用。
+
+**取价优先级（按 EXCHANGE_PRIORITY 顺序，动态计算每个资产的可用交易所）：**
+- 绝大多数主流币：Binance → Hyperliquid → OKX → Bitget → CoinGecko
 - HYPE：Hyperliquid → OKX → Bitget → CoinGecko（Binance 无 HYPEUSDT 交易对）
 - XAUT：OKX → CoinGecko
 - A 股（如 `601899`）：仅 pytdx（交易时段：周一至周五 9:30–11:30 / 13:00–15:00）
@@ -274,10 +278,9 @@ market-watch/
 - 用户要取消或查看当前警报
 - 收到 `[MARKET_ALERT 触发]` 或 `[NEWS_ALERT 触发]`
 
-**添加非标资产（如 PEPE、新上线币种）：**
-- 在 `price-monitor.py` 的 `ASSET_EXCHANGES` 中添加资产
-- 在对应交易所的 fetcher 函数中添加 symbol 映射
-- 重启 daemon：`bash daemon.sh restart --agent {agent}`
+**任意加密货币：**
+- 只要该币在 Binance/OKX/Bitget 有 USDT 交易对，或在 Hyperliquid/CoinGecko 上架，即可直接使用，无需改代码
+- Symbol 映射每小时自动刷新；只有极新上线的币（上线不足1小时）才需要重启 daemon 立即生效
 
 ---
 

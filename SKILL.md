@@ -1,7 +1,7 @@
 ---
 name: "market-watch"
-version: "1.1.0"
-description: "Market monitoring and alert system for prices and news. Use when the user asks to watch a price, monitor market conditions, get notified when an asset hits a target, or keep an eye on breaking news. Covers crypto (BTC/ETH/HYPE/SOL/XAUT etc.) and A-shares (real-time via TongDaXin)."
+version: "1.2.0"
+description: "Market monitoring and alert system for prices and news. Use when the user asks to watch a price, monitor market conditions, get notified when an asset hits a target, or keep an eye on breaking news. Covers any USDT-paired crypto and A-shares (real-time via TongDaXin)."
 ---
 
 # Market Watch Skill
@@ -21,17 +21,20 @@ description: "Market monitoring and alert system for prices and news. Use when t
 
 | 来源 | 协议 | 资产 | 延迟 |
 |------|------|------|------|
-| Binance | HTTP ticker（5s 轮询） | BTC/ETH/SOL/BNB | ~100ms |
-| Hyperliquid | HTTP allMids（5s 轮询） | HYPE 等所有 HL 资产 | ~100ms |
-| OKX | HTTP ticker（5s 轮询） | BTC/ETH/SOL/XAUT/HYPE | ~100ms |
-| Bitget | HTTP ticker（5s 轮询） | BTC/ETH/SOL/HYPE | ~100ms |
+| Binance | HTTP ticker（5s 轮询） | 任意 USDT 交易对（动态发现） | ~100ms |
+| Hyperliquid | HTTP allMids（5s 轮询） | 全部 HL 上线资产（动态发现） | ~100ms |
+| OKX | HTTP ticker（5s 轮询） | 任意 USDT SPOT（动态发现） | ~100ms |
+| Bitget | HTTP ticker（5s 轮询） | 任意 USDT SPOT（动态发现） | ~100ms |
 | pytdx | TCP 轮询（盘中 4s） | A股（沪深） | ~200ms |
-| CoinGecko | HTTP 轮询（30s） | 全资产 fallback | 30s |
+| CoinGecko | HTTP 轮询（30s） | 全资产 fallback（动态发现） | 30s |
 
-**Asset → Exchange 优先级:**
-- BTC/ETH/SOL: Binance → Hyperliquid → OKX → Bitget → CoinGecko
+**动态交易对发现：** 守护进程启动时自动从各交易所拉取完整交易对列表，每小时刷新一次。任意 USDT 交易对的加密货币均自动支持，无需手动添加 symbol 映射。
+
+**Asset → Exchange 优先级（按 EXCHANGE_PRIORITY 顺序，动态计算每个资产的可用交易所）：**
+- 绝大多数主流币: Binance → Hyperliquid → OKX → Bitget → CoinGecko
 - HYPE: Hyperliquid → OKX → Bitget → CoinGecko（Binance 无 HYPEUSDT 交易对）
-- XAUT: OKX → CoinGecko
+- XAUT: OKX → CoinGecko（地区限制可能影响 OKX）
+- 任何新上线或长尾币种：自动检查各交易所，无需改代码
 
 ### 新闻源
 
@@ -224,8 +227,9 @@ python3 "$SKILL/cancel-alert.py" --agent laok --all             # 取消全部
 
 ## 注意事项
 
-- **非标资产（如 PEPE）**：在 `price-monitor.py` 的 `ASSET_EXCHANGES` 中添加，restart daemon
-- **HYPE**: 优先用 Hyperliquid HTTP（allMids 含 HYPE 现货 mid price）→ OKX → Bitget → CoinGecko。Binance 不存在 HYPEUSDT 交易对，已从代码中移除
+- **任意加密货币**：只要该币在 Binance/OKX/Bitget 有 USDT 交易对，或在 Hyperliquid/CoinGecko 上架，即可直接使用，无需改代码或重启 daemon
+- **交易对列表刷新**：启动时自动拉取，每小时刷新一次；如某个交易所加载失败，保留上次缓存继续运行
+- **HYPE**: 优先用 Hyperliquid HTTP（allMids 含 HYPE 现货 mid price）→ OKX → Bitget → CoinGecko
 - **XAUT**: 仅 OKX 有，可能因地区限制失败，CoinGecko 兜底
 - **A股**: 只在交易时段（9:30-11:30 / 13:00-15:00）轮询，非交易时段自动跳过
 - **金十/华尔街见闻**: 非官方接口，接口变更时 monitor 会静默跳过，不影响 RSS 源继续工作

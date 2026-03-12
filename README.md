@@ -4,7 +4,9 @@
 
 **Real-time market monitoring and alert system for OpenClaw agents.**
 
-Watch crypto prices (BTC, ETH, SOL, HYPE, XAUT, and more) and Chinese A-shares via HTTP polling. Monitor breaking news from Jin10, Wallstreetcn, CoinDesk, CoinTelegraph, The Block, and Decrypt with keyword matching. When a price condition is met or a keyword-matched news item appears, the agent gets notified and proactively contacts the user.
+Watch any USDT-paired crypto price and Chinese A-shares via HTTP polling. Monitor breaking news from Jin10, Wallstreetcn, CoinDesk, CoinTelegraph, The Block, and Decrypt with keyword matching. When a price condition is met or a keyword-matched news item appears, the agent gets notified and proactively contacts the user.
+
+Exchange symbol maps are fetched automatically at startup and refreshed hourly — any asset listed on Binance, Hyperliquid, OKX, Bitget, or CoinGecko is supported out of the box with no code changes.
 
 > Built as an [OpenClaw](https://github.com/openclaw) AgentSkill. Works out of the box with any OpenClaw agent.
 
@@ -102,15 +104,17 @@ bash "$HOME/.openclaw/skills/market-watch/scripts/install-watchdog.sh" install -
 
 | Exchange | Protocol | Assets | Latency |
 |----------|----------|--------|---------|
-| Binance | HTTP ticker (polling 5s) | BTC, ETH, SOL, BNB | ~100ms |
-| Hyperliquid | HTTP allMids (polling 5s) | HYPE + all HL-listed assets | ~100ms |
-| OKX | HTTP ticker (polling 5s) | BTC, ETH, SOL, XAUT, HYPE | ~100ms |
-| Bitget | HTTP ticker (polling 5s) | BTC, ETH, SOL, HYPE | ~100ms |
-| CoinGecko | HTTP polling (30s fallback) | Universal fallback | ~30s |
+| Binance | HTTP ticker (polling 5s) | All USDT pairs (dynamic) | ~100ms |
+| Hyperliquid | HTTP allMids (polling 5s) | All HL-listed assets (dynamic) | ~100ms |
+| OKX | HTTP ticker (polling 5s) | All USDT SPOT (dynamic) | ~100ms |
+| Bitget | HTTP ticker (polling 5s) | All USDT SPOT (dynamic) | ~100ms |
+| CoinGecko | HTTP polling (30s fallback) | Universal fallback (dynamic) | ~30s |
 | pytdx | TCP request-response | A-shares (Shanghai/Shenzhen) | ~200ms |
 
+**Symbol discovery:** Exchange symbol maps are fetched at startup from the exchanges' own public APIs and refreshed every hour. No hardcoded symbol tables — any USDT-paired asset is automatically supported.
+
 **Asset priority (best-to-fallback):**
-- BTC / ETH / SOL: Binance → Hyperliquid → OKX → Bitget → CoinGecko
+- Most assets: Binance → Hyperliquid → OKX → Bitget → CoinGecko (dynamically determined per asset)
 - HYPE: Hyperliquid → OKX → Bitget → CoinGecko (no HYPEUSDT on Binance)
 - XAUT: OKX → CoinGecko
 - A-shares (e.g. `600519`): pytdx only (market hours: Mon–Fri 9:30–11:30 / 13:00–15:00 CST)
@@ -276,10 +280,9 @@ This skill ships with a `SKILL.md` that is automatically loaded by the OpenClaw 
 - User asks to cancel or list current alerts
 - You receive a `[MARKET_ALERT 触发]` or `[NEWS_ALERT 触发]` message
 
-**Non-standard assets (e.g. PEPE, new listings):**
-- Add the asset to `ASSET_EXCHANGES` in `price-monitor.py`
-- Add its symbol mapping to the relevant exchange fetcher
-- Restart the daemon: `bash daemon.sh restart --agent {agent}`
+**Any crypto asset:**
+- If the asset has a USDT pair on Binance, OKX, or Bitget, or is listed on Hyperliquid / CoinGecko, it's automatically supported — no code changes needed
+- Exchange symbol maps refresh every hour; a daemon restart is only needed if you want to pick up a very recently listed coin without waiting for the next hourly refresh
 
 ---
 

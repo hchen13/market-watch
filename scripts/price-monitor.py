@@ -6,6 +6,8 @@ price-monitor.py — 价格盯盘守护进程
   - Crypto: 5s HTTP 轮询，交易所优先级 fallback
     Binance > Hyperliquid > OKX > Bitget > CoinGecko
   - A股: pytdx TCP 轮询（盘中 4s）
+  - 启动时自动从各交易所拉取完整交易对列表，每小时刷新一次
+    任意 USDT 交易对的加密货币均自动支持，无需手动维护 symbol 映射
 
 用法:
   python3 price-monitor.py --agent laok
@@ -45,36 +47,199 @@ ASTOCK_POLL_INTERVAL = 4    # 秒（盘中）
 HTTP_TIMEOUT = 5            # 秒
 FAILURE_ALERT_SEC = 600     # 连续失败10分钟告警
 PRICE_STALE_SEC = 60        # 超过此秒数的价格视为 stale，跳过触发检查
+SYMBOL_CACHE_TTL = 3600     # 交易对列表缓存 TTL（秒），每小时刷新
 
-# 交易所优先级（全局）
+# 交易所优先级（硬编码，业务决策）
 EXCHANGE_PRIORITY = ["binance", "hyperliquid", "okx", "bitget", "coingecko"]
 
-# 每个资产在哪些交易所有（按全局优先级筛选）
-ASSET_EXCHANGES = {
-    "BTC":  ["binance", "hyperliquid", "okx", "bitget", "coingecko"],
-    "ETH":  ["binance", "hyperliquid", "okx", "bitget", "coingecko"],
-    "SOL":  ["binance", "hyperliquid", "okx", "bitget", "coingecko"],
-    "BNB":  ["binance", "okx", "coingecko"],
-    # HYPE: Binance 上不存在 HYPEUSDT 交易对，从 binance 移除
-    "HYPE": ["hyperliquid", "okx", "bitget", "coingecko"],
-    "XAUT": ["okx", "coingecko"],
+# ── Symbol Map Cache ──────────────────────────────────────────────────────────
+# binance / okx / bitget / coingecko : dict[str, str]  base_asset → symbol/instId/cg_id
+# hyperliquid                         : set[str]        可用资产名称集合
+# last_update                         : float           上次刷新时间戳
+
+_symbol_cache: dict = {
+    "binance":     {},
+    "okx":         {},
+    "bitget":      {},
+    "hyperliquid": set(),
+    "coingecko":   {},
+    "last_update": 0.0,
 }
+
+# ── Symbol Discovery ──────────────────────────────────────────────────────────
+
+def _build_binance_symbols() -> dict[str, str]:
+    """从 Binance exchangeInfo 构建 base_asset → BTCUSDT 映射（仅 USDT 交易对）。"""
+    resp = requests.get(
+        "https://api.binance.com/api/v3/exchangeInfo",
+        timeout=15,
+    )
+    resp.raise_for_status()
+    result = {}
+    for sym in resp.json().get("symbols", []):
+        if sym.get("quoteAsset") == "USDT" and sym.get("status") == "TRADING":
+            result[sym["baseAsset"]] = sym["symbol"]
+    return result
+
+
+def _build_okx_symbols() -> dict[str, str]:
+    """从 OKX public/instruments 构建 baseCcy → BTC-USDT 映射（仅 USDT SPOT live）。"""
+    resp = requests.get(
+        "https://www.okx.com/api/v5/public/instruments?instType=SPOT",
+        timeout=15,
+    )
+    resp.raise_for_status()
+    result = {}
+    for inst in resp.json().get("data", []):
+        if inst.get("quoteCcy") == "USDT" and inst.get("state") == "live":
+            result[inst["baseCcy"]] = inst["instId"]
+    return result
+
+
+def _build_bitget_symbols() -> dict[str, str]:
+    """从 Bitget spot/public/symbols 构建 baseCoin → BTCUSDT 映射（仅 USDT online）。"""
+    resp = requests.get(
+        "https://api.bitget.com/api/v2/spot/public/symbols",
+        timeout=15,
+    )
+    resp.raise_for_status()
+    result = {}
+    for sym in resp.json().get("data", []):
+        if sym.get("quoteCoin") == "USDT" and sym.get("status") == "online":
+            result[sym["baseCoin"]] = sym["symbol"]
+    return result
+
+
+def _build_hyperliquid_assets() -> set[str]:
+    """从 Hyperliquid allMids 获取所有可用资产名称。"""
+    resp = requests.post(
+        "https://api.hyperliquid.xyz/info",
+        json={"type": "allMids"},
+        timeout=15,
+    )
+    resp.raise_for_status()
+    return set(resp.json().keys())
+
+
+def _build_coingecko_symbols() -> dict[str, str]:
+    """
+    从 CoinGecko coins/markets 构建 SYMBOL → cg_id 映射（按市值降序）。
+    使用市值最高的项目作为 symbol 对应的 ID，解决 CoinGecko symbol 重复问题。
+    覆盖前 1000 个市值最大的币种（4页 × 250条），足以覆盖用户实际监控需求。
+    """
+    result: dict[str, str] = {}
+    for page in range(1, 5):  # top 1000 coins (250 per page × 4 pages)
+        try:
+            resp = requests.get(
+                "https://api.coingecko.com/api/v3/coins/markets",
+                params={
+                    "vs_currency": "usd",
+                    "order": "market_cap_desc",
+                    "per_page": 250,
+                    "page": page,
+                },
+                timeout=20,
+            )
+            resp.raise_for_status()
+            coins = resp.json()
+            if not coins:
+                break
+            for coin in coins:
+                sym = coin.get("symbol", "").upper()
+                # 只保留第一次出现的（已按市值降序，第一个即市值最高）
+                if sym and sym not in result:
+                    result[sym] = coin["id"]
+        except Exception as e:
+            if page == 1:
+                raise  # 第1页失败，向上抛出触发 fallback 机制
+            log.warning(f"CoinGecko markets page {page} failed ({e}), using {len(result)} symbols so far")
+            break
+    return result
+
+
+def refresh_symbol_maps(force: bool = False) -> None:
+    """
+    刷新各交易所的交易对列表缓存。
+    - force=True : 强制刷新（启动时调用，确保首次取价前完成）
+    - force=False: 仅在超过 SYMBOL_CACHE_TTL 后刷新（主循环内定期调用）
+    任何单个交易所加载失败时，保留上次缓存，log warning，继续运行。
+    """
+    now = time.time()
+    if not force and now - _symbol_cache["last_update"] < SYMBOL_CACHE_TTL:
+        return
+
+    builders = [
+        ("binance",   _build_binance_symbols),
+        ("okx",       _build_okx_symbols),
+        ("bitget",    _build_bitget_symbols),
+        ("coingecko", _build_coingecko_symbols),
+    ]
+
+    for name, builder in builders:
+        try:
+            new_map = builder()
+            if new_map:
+                _symbol_cache[name] = new_map
+                log.info(f"Symbol map loaded: {name} ({len(new_map)} pairs)")
+        except Exception as e:
+            cached = _symbol_cache[name]
+            if cached:
+                log.warning(
+                    f"{name} symbol map refresh failed ({e}), "
+                    f"using cached {len(cached)} pairs"
+                )
+            else:
+                log.warning(f"{name} symbol map load failed ({e}), exchange unavailable until next refresh")
+
+    # Hyperliquid（set，无需 reverse map）
+    try:
+        hl_assets = _build_hyperliquid_assets()
+        if hl_assets:
+            _symbol_cache["hyperliquid"] = hl_assets
+            log.info(f"Symbol map loaded: hyperliquid ({len(hl_assets)} assets)")
+    except Exception as e:
+        cached = _symbol_cache["hyperliquid"]
+        if cached:
+            log.warning(
+                f"hyperliquid asset list refresh failed ({e}), "
+                f"using cached {len(cached)} assets"
+            )
+        else:
+            log.warning(f"hyperliquid asset list load failed ({e}), exchange unavailable until next refresh")
+
+    _symbol_cache["last_update"] = now
+
+
+# ── 动态 ASSET_EXCHANGES ──────────────────────────────────────────────────────
+
+def get_asset_exchanges(asset: str) -> list[str]:
+    """
+    动态计算资产在哪些交易所有交易对，按 EXCHANGE_PRIORITY 顺序返回。
+    替代硬编码的 ASSET_EXCHANGES 字典。
+    """
+    available = []
+    for ex in EXCHANGE_PRIORITY:
+        sym_data = _symbol_cache.get(ex)
+        if isinstance(sym_data, set):
+            if asset in sym_data:
+                available.append(ex)
+        elif isinstance(sym_data, dict):
+            if asset in sym_data:
+                available.append(ex)
+    return available
+
 
 # ── Binance ───────────────────────────────────────────────────────────────────
 # GET /api/v3/ticker/price?symbols=["BTCUSDT","ETHUSDT"]
 
-BINANCE_SYMBOL_MAP = {
-    "BTC": "BTCUSDT", "ETH": "ETHUSDT", "SOL": "SOLUSDT",
-    "BNB": "BNBUSDT",
-    # HYPE: 已验证 HYPEUSDT 在 Binance 不存在（返回 -1121 Invalid symbol）
-}
-BINANCE_REVERSE = {v: k for k, v in BINANCE_SYMBOL_MAP.items()}
-
-
 def fetch_binance(assets: list[str]) -> dict[str, float]:
-    symbols = [BINANCE_SYMBOL_MAP[a] for a in assets if a in BINANCE_SYMBOL_MAP]
+    symbol_map = _symbol_cache["binance"]
+    symbols = [symbol_map[a] for a in assets if a in symbol_map]
     if not symbols:
         return {}
+
+    # 构建反向映射 symbol → asset（仅针对本次请求的资产，避免全局反向冲突）
+    symbol_reverse = {symbol_map[a]: a for a in assets if a in symbol_map}
 
     # 先尝试批量请求
     try:
@@ -86,7 +251,7 @@ def fetch_binance(assets: list[str]) -> dict[str, float]:
         resp.raise_for_status()
         result = {}
         for item in resp.json():
-            asset = BINANCE_REVERSE.get(item["symbol"])
+            asset = symbol_reverse.get(item["symbol"])
             if asset and float(item["price"]) > 0:
                 result[asset] = float(item["price"])
         return result
@@ -103,7 +268,7 @@ def fetch_binance(assets: list[str]) -> dict[str, float]:
             )
             resp.raise_for_status()
             data = resp.json()
-            asset = BINANCE_REVERSE.get(data.get("symbol", ""))
+            asset = symbol_reverse.get(data.get("symbol", ""))
             price = float(data.get("price", 0))
             if asset and price > 0:
                 result[asset] = price
@@ -115,12 +280,6 @@ def fetch_binance(assets: list[str]) -> dict[str, float]:
 # ── Hyperliquid ───────────────────────────────────────────────────────────────
 # POST https://api.hyperliquid.xyz/info  {"type": "allMids"}
 
-HL_ASSET_MAP = {
-    "BTC": "BTC", "ETH": "ETH", "SOL": "SOL", "HYPE": "HYPE",
-    "BNB": "BNB", "XAUT": "XAUT",
-}
-
-
 def fetch_hyperliquid(assets: list[str]) -> dict[str, float]:
     resp = requests.post(
         "https://api.hyperliquid.xyz/info",
@@ -130,10 +289,10 @@ def fetch_hyperliquid(assets: list[str]) -> dict[str, float]:
     mids = resp.json()  # {"BTC": "69500.5", "ETH": "2025.3", ...}
     result = {}
     for asset in assets:
-        hl_name = HL_ASSET_MAP.get(asset, asset)
-        if hl_name in mids:
+        # Hyperliquid 直接用资产名称作 key（BTC、ETH、HYPE 等），无需映射
+        if asset in mids:
             try:
-                price = float(mids[hl_name])
+                price = float(mids[asset])
                 if price > 0:
                     result[asset] = price
             except (ValueError, TypeError):
@@ -144,16 +303,11 @@ def fetch_hyperliquid(assets: list[str]) -> dict[str, float]:
 # ── OKX ───────────────────────────────────────────────────────────────────────
 # GET /api/v5/market/ticker?instId=BTC-USDT
 
-OKX_INST_MAP = {
-    "BTC": "BTC-USDT", "ETH": "ETH-USDT", "SOL": "SOL-USDT",
-    "BNB": "BNB-USDT", "HYPE": "HYPE-USDT", "XAUT": "XAUT-USDT",
-}
-
-
 def fetch_okx(assets: list[str]) -> dict[str, float]:
+    inst_map = _symbol_cache["okx"]
     result = {}
     for asset in assets:
-        inst = OKX_INST_MAP.get(asset)
+        inst = inst_map.get(asset)
         if not inst:
             continue
         try:
@@ -175,15 +329,11 @@ def fetch_okx(assets: list[str]) -> dict[str, float]:
 # ── Bitget ────────────────────────────────────────────────────────────────────
 # GET /api/v2/spot/market/tickers?symbol=BTCUSDT
 
-BITGET_SYMBOL_MAP = {
-    "BTC": "BTCUSDT", "ETH": "ETHUSDT", "SOL": "SOLUSDT", "HYPE": "HYPEUSDT",
-}
-
-
 def fetch_bitget(assets: list[str]) -> dict[str, float]:
+    symbol_map = _symbol_cache["bitget"]
     result = {}
     for asset in assets:
-        sym = BITGET_SYMBOL_MAP.get(asset)
+        sym = symbol_map.get(asset)
         if not sym:
             continue
         try:
@@ -205,26 +355,25 @@ def fetch_bitget(assets: list[str]) -> dict[str, float]:
 # ── CoinGecko ─────────────────────────────────────────────────────────────────
 # GET /api/v3/simple/price?ids=bitcoin,ethereum&vs_currencies=usd
 
-COINGECKO_MAP = {
-    "BTC": "bitcoin", "ETH": "ethereum", "SOL": "solana",
-    "BNB": "binancecoin", "HYPE": "hyperliquid", "XAUT": "tether-gold",
-}
-COINGECKO_REVERSE = {v: k for k, v in COINGECKO_MAP.items()}
-
-
 def fetch_coingecko(assets: list[str]) -> dict[str, float]:
-    ids = [COINGECKO_MAP[a] for a in assets if a in COINGECKO_MAP]
-    if not ids:
+    cg_map = _symbol_cache["coingecko"]
+    ids_for_assets = {a: cg_map[a] for a in assets if a in cg_map}
+    if not ids_for_assets:
         return {}
+
+    # 构建 cg_id → asset 反向映射（仅针对本次请求的资产）
+    cg_id_to_asset = {v: k for k, v in ids_for_assets.items()}
+    ids_str = ",".join(ids_for_assets.values())
+
     resp = requests.get(
-        f"https://api.coingecko.com/api/v3/simple/price?ids={','.join(ids)}&vs_currencies=usd",
+        f"https://api.coingecko.com/api/v3/simple/price?ids={ids_str}&vs_currencies=usd",
         timeout=HTTP_TIMEOUT,
     )
     resp.raise_for_status()
     data = resp.json()
     result = {}
     for cg_id, vals in data.items():
-        asset = COINGECKO_REVERSE.get(cg_id)
+        asset = cg_id_to_asset.get(cg_id)
         if asset and vals.get("usd", 0) > 0:
             result[asset] = float(vals["usd"])
     return result
@@ -233,11 +382,11 @@ def fetch_coingecko(assets: list[str]) -> dict[str, float]:
 # ── 统一取价 ──────────────────────────────────────────────────────────────────
 
 EXCHANGE_FETCHERS = {
-    "binance":      fetch_binance,
-    "hyperliquid":  fetch_hyperliquid,
-    "okx":          fetch_okx,
-    "bitget":       fetch_bitget,
-    "coingecko":    fetch_coingecko,
+    "binance":     fetch_binance,
+    "hyperliquid": fetch_hyperliquid,
+    "okx":         fetch_okx,
+    "bitget":      fetch_bitget,
+    "coingecko":   fetch_coingecko,
 }
 
 
@@ -254,7 +403,8 @@ def fetch_all_crypto(needed: set[str]) -> dict[str, tuple[float, str, float]]:
     for exchange in EXCHANGE_PRIORITY:
         if not remaining:
             break
-        fetchable = [a for a in remaining if exchange in ASSET_EXCHANGES.get(a, [])]
+        # 动态检查此交易所支持哪些资产（替代硬编码 ASSET_EXCHANGES）
+        fetchable = [a for a in remaining if exchange in get_asset_exchanges(a)]
         if not fetchable:
             continue
         fetcher = EXCHANGE_FETCHERS.get(exchange)
@@ -424,6 +574,13 @@ def run(agent_id: str, alerts_file: Path):
     _setup_logging(agent_id)
     log.info(f"=== price-monitor start | agent={agent_id} | interval={CRYPTO_POLL_INTERVAL}s ===")
 
+    # ── 启动时加载交易对列表（确保在开始检查警报前完成）──
+    log.info("Loading exchange symbol maps (this may take a few seconds)...")
+    refresh_symbol_maps(force=True)
+    loaded = {k: len(v) for k, v in _symbol_cache.items()
+              if k != "last_update" and v}
+    log.info(f"Symbol maps ready: {loaded}")
+
     # F-01: prices 字典加时间戳，格式 {asset: (price, source, timestamp)}
     prices: dict[str, tuple[float, str, float]] = {}
     last_astock = 0.0
@@ -434,6 +591,9 @@ def run(agent_id: str, alerts_file: Path):
 
     while True:
         cycle_start = time.time()
+
+        # ── 定期刷新交易对列表（非强制，仅 TTL 到期后才刷新）──
+        refresh_symbol_maps()
 
         # ── 读取活跃警报 ──
         try:
