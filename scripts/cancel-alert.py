@@ -7,7 +7,7 @@ cancel-alert.py — 取消/查看价格警报
   python3 cancel-alert.py --agent laok --id eth-1741234 # 按 ID 取消
   python3 cancel-alert.py --agent laok --asset ETH       # 取消所有 ETH 警报
   python3 cancel-alert.py --agent laok --type price      # 取消所有价格类警报
-  python3 cancel-alert.py --agent laok --type news       # 取消所有新闻类警报（待实现）
+  python3 cancel-alert.py --agent laok --type news       # 取消所有新闻类警报
   python3 cancel-alert.py --agent laok --all             # 取消所有活跃警报
 """
 

@@ -1,12 +1,17 @@
 #!/bin/bash
 # daemon.sh — market-watch 守护进程管理
 #
+# 管理两个后台进程：
+#   price-monitor.py  — 价格盯盘（HTTP polling，每5s）
+#   news-monitor.py   — 新闻盯盘（RSS/API polling，默认每5分钟）
+#
 # 用法:
 #   daemon.sh start   [--agent laok]
 #   daemon.sh stop    [--agent laok]
 #   daemon.sh restart [--agent laok]
 #   daemon.sh status  [--agent laok]
 #   daemon.sh log     [--agent laok] [--lines N]
+#   daemon.sh ensure  [--agent laok]
 
 set -euo pipefail
 
@@ -24,15 +29,50 @@ while [[ $# -gt 0 ]]; do
 done
 
 SKILL_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-MONITOR_PY="$SKILL_DIR/scripts/price-monitor.py"
+PRICE_MONITOR_PY="$SKILL_DIR/scripts/price-monitor.py"
+NEWS_MONITOR_PY="$SKILL_DIR/scripts/news-monitor.py"
 ALERTS_FILE="$HOME/.openclaw/agents/$AGENT/private/market-alerts.json"
-PID_FILE="/tmp/market-watch-${AGENT}.pid"
-LOG_FILE="/tmp/market-watch-${AGENT}.log"
+
+# PID 文件（新命名带 -price / -news 后缀）
+PRICE_PID_FILE="/tmp/market-watch-${AGENT}-price.pid"
+NEWS_PID_FILE="/tmp/market-watch-${AGENT}-news.pid"
+# 旧 PID 文件（迁移兼容）
+OLD_PID_FILE="/tmp/market-watch-${AGENT}.pid"
+
+# 日志文件（Python RotatingFileHandler 管理）
+PRICE_LOG_FILE="/tmp/market-watch-${AGENT}.log"
+NEWS_LOG_FILE="/tmp/market-watch-${AGENT}-news.log"
+
+# ── 迁移兼容：旧 PID 文件 → 新 PRICE_PID_FILE ─────────────────────────────────
+
+migrate_old_pid() {
+    if [[ -f "$OLD_PID_FILE" ]] && [[ ! -f "$PRICE_PID_FILE" ]]; then
+        cp "$OLD_PID_FILE" "$PRICE_PID_FILE"
+        rm -f "$OLD_PID_FILE"
+    fi
+}
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
 is_running() {
-    [[ -f "$PID_FILE" ]] && kill -0 "$(cat "$PID_FILE")" 2>/dev/null
+    local pid_file="$1"
+    [[ -f "$pid_file" ]] && kill -0 "$(cat "$pid_file")" 2>/dev/null
+}
+
+count_active_by_type() {
+    local alert_type="$1"
+    [[ -f "$ALERTS_FILE" ]] || { echo 0; return; }
+    python3 -c "
+import json, sys
+try:
+    data = json.load(open('$ALERTS_FILE'))
+    t = '$alert_type'
+    n = sum(1 for a in data.get('alerts',[])
+            if a.get('status')=='active' and a.get('type','price')==t)
+    print(n)
+except Exception:
+    print(0)
+" 2>/dev/null || echo 0
 }
 
 show_alerts() {
@@ -47,10 +87,11 @@ try:
     print(f"  活跃警报: {len(active)} 个  (价格:{len(price)} 新闻:{len(news)})")
     for a in active[:10]:
         if a.get("type", "price") == "price":
-            print(f"    · {a['asset']} {a['condition']} {a['target_price']}  [{a.get('context_summary','')[:40]}]")
+            print(f"    · [价格] {a['asset']} {a['condition']} {a['target_price']}  [{a.get('context_summary','')[:40]}]")
         else:
-            kw = ', '.join(a.get('keywords', [])[:3])
-            print(f"    · NEWS: {kw}  [{a.get('context_summary','')[:40]}]")
+            kw = ', '.join(a.get('keywords', [])[:4])
+            srcs = ', '.join(a.get('sources', [])[:3])
+            print(f"    · [新闻] {kw}  [{srcs}]  [{a.get('context_summary','')[:30]}]")
     if len(active) > 10:
         print(f"    ... 还有 {len(active)-10} 个")
 except Exception as e:
@@ -58,96 +99,189 @@ except Exception as e:
 EOF
 }
 
+start_price_monitor() {
+    migrate_old_pid
+    if is_running "$PRICE_PID_FILE"; then
+        echo "[price-monitor] 已在运行 PID=$(cat "$PRICE_PID_FILE")"
+        return 0
+    fi
+    mkdir -p "$(dirname "$ALERTS_FILE")"
+    # stdout/stderr 丢弃到 /dev/null；日志由 Python RotatingFileHandler 管理
+    nohup python3 "$PRICE_MONITOR_PY" \
+        --agent "$AGENT" \
+        --alerts-file "$ALERTS_FILE" \
+        > /dev/null 2>&1 &
+    echo $! > "$PRICE_PID_FILE"
+    sleep 1
+    if is_running "$PRICE_PID_FILE"; then
+        echo "[price-monitor] 已启动 agent=$AGENT PID=$(cat "$PRICE_PID_FILE")"
+        echo "  日志: $PRICE_LOG_FILE"
+    else
+        echo "[price-monitor] ❌ 启动失败"
+        echo "  最后 10 行日志:"
+        tail -10 "$PRICE_LOG_FILE" 2>/dev/null || echo "  (日志文件不存在)"
+        return 1
+    fi
+}
+
+start_news_monitor() {
+    if is_running "$NEWS_PID_FILE"; then
+        echo "[news-monitor] 已在运行 PID=$(cat "$NEWS_PID_FILE")"
+        return 0
+    fi
+    mkdir -p "$(dirname "$ALERTS_FILE")"
+    nohup python3 "$NEWS_MONITOR_PY" \
+        --agent "$AGENT" \
+        --alerts-file "$ALERTS_FILE" \
+        > /dev/null 2>&1 &
+    echo $! > "$NEWS_PID_FILE"
+    sleep 1
+    if is_running "$NEWS_PID_FILE"; then
+        echo "[news-monitor] 已启动 agent=$AGENT PID=$(cat "$NEWS_PID_FILE")"
+        echo "  日志: $NEWS_LOG_FILE"
+    else
+        echo "[news-monitor] ❌ 启动失败"
+        echo "  最后 10 行日志:"
+        tail -10 "$NEWS_LOG_FILE" 2>/dev/null || echo "  (日志文件不存在)"
+        return 1
+    fi
+}
+
+stop_price_monitor() {
+    migrate_old_pid
+    # 兼容：同时检查旧 PID 文件
+    for pf in "$PRICE_PID_FILE" "$OLD_PID_FILE"; do
+        if [[ -f "$pf" ]]; then
+            PID=$(cat "$pf")
+            kill "$PID" 2>/dev/null && echo "[price-monitor] 已停止 PID=$PID" || true
+            rm -f "$pf"
+        fi
+    done
+}
+
+stop_news_monitor() {
+    if is_running "$NEWS_PID_FILE"; then
+        PID=$(cat "$NEWS_PID_FILE")
+        kill "$PID" 2>/dev/null && echo "[news-monitor] 已停止 PID=$PID" || true
+        rm -f "$NEWS_PID_FILE"
+    else
+        rm -f "$NEWS_PID_FILE" 2>/dev/null || true
+    fi
+}
+
 # ── Actions ───────────────────────────────────────────────────────────────────
 
 case "$ACTION" in
 
     start)
-        if is_running; then
-            echo "[market-watch] 已在运行 PID=$(cat "$PID_FILE") agent=$AGENT"
-            show_alerts
-            exit 0
-        fi
-        mkdir -p "$(dirname "$ALERTS_FILE")"
-        # 日志轮转由 Python RotatingFileHandler 管理，stdout/stderr 丢弃避免双写
-        nohup python3 "$MONITOR_PY" \
-            --agent "$AGENT" \
-            --alerts-file "$ALERTS_FILE" \
-            > /dev/null 2>&1 &
-        echo $! > "$PID_FILE"
-        sleep 1
-        if is_running; then
-            echo "[market-watch] 已启动 agent=$AGENT PID=$(cat "$PID_FILE")"
-            echo "  日志: $LOG_FILE"
-            show_alerts
+        migrate_old_pid
+        PRICE_ACTIVE=$(count_active_by_type "price")
+        NEWS_ACTIVE=$(count_active_by_type "news")
+
+        if [[ "$PRICE_ACTIVE" -gt 0 ]]; then
+            start_price_monitor
         else
-            echo "[market-watch] ❌ 启动失败"
-            echo "最后 10 行日志:"
-            tail -10 "$LOG_FILE" 2>/dev/null
-            exit 1
+            if is_running "$PRICE_PID_FILE"; then
+                echo "[price-monitor] 运行中（无活跃价格警报，将在下一个循环自动退出）"
+            else
+                echo "[price-monitor] 无活跃价格警报，跳过启动"
+            fi
         fi
+
+        if [[ "$NEWS_ACTIVE" -gt 0 ]]; then
+            start_news_monitor
+        else
+            if is_running "$NEWS_PID_FILE"; then
+                echo "[news-monitor] 运行中（无活跃新闻警报，将在下一个循环自动退出）"
+            else
+                echo "[news-monitor] 无活跃新闻警报，跳过启动"
+            fi
+        fi
+
+        show_alerts
         ;;
 
     stop)
-        if is_running; then
-            PID=$(cat "$PID_FILE")
-            kill "$PID" 2>/dev/null && rm -f "$PID_FILE"
-            echo "[market-watch] 已停止 PID=$PID"
-        else
-            echo "[market-watch] 未运行"
-            rm -f "$PID_FILE"
-        fi
+        stop_price_monitor
+        stop_news_monitor
+        echo "[market-watch] 全部已停止 agent=$AGENT"
         ;;
 
     restart)
-        bash "$0" stop --agent "$AGENT"   || true
+        bash "$0" stop  --agent "$AGENT" || true
         sleep 1
         bash "$0" start --agent "$AGENT"
         ;;
 
     status)
-        if is_running; then
-            PID=$(cat "$PID_FILE")
+        migrate_old_pid
+        echo "=== market-watch status | agent=$AGENT ==="
+
+        if is_running "$PRICE_PID_FILE"; then
+            PID=$(cat "$PRICE_PID_FILE")
             START_TIME=$(ps -p "$PID" -o lstart= 2>/dev/null | xargs || echo "未知")
-            echo "[market-watch] ✅ 运行中 PID=$PID  agent=$AGENT"
-            echo "  启动时间: $START_TIME"
-            show_alerts
+            echo "[price-monitor] ✅ 运行中  PID=$PID  启动: $START_TIME"
         else
-            echo "[market-watch] ⛔ 未运行  agent=$AGENT"
-            echo "  启动: bash $0 start --agent $AGENT"
+            echo "[price-monitor] ⛔ 未运行"
         fi
+
+        if is_running "$NEWS_PID_FILE"; then
+            PID=$(cat "$NEWS_PID_FILE")
+            START_TIME=$(ps -p "$PID" -o lstart= 2>/dev/null | xargs || echo "未知")
+            echo "[news-monitor]  ✅ 运行中  PID=$PID  启动: $START_TIME"
+        else
+            echo "[news-monitor]  ⛔ 未运行"
+        fi
+
+        show_alerts
+        echo ""
+        echo "  价格日志: $PRICE_LOG_FILE"
+        echo "  新闻日志: $NEWS_LOG_FILE"
         ;;
 
     log)
-        if [[ -f "$LOG_FILE" ]]; then
-            echo "=== 最近 $LOG_LINES 行日志 ($LOG_FILE) ==="
-            tail -"$LOG_LINES" "$LOG_FILE"
+        echo "=== price-monitor 最近 $LOG_LINES 行 ($PRICE_LOG_FILE) ==="
+        if [[ -f "$PRICE_LOG_FILE" ]]; then
+            tail -"$LOG_LINES" "$PRICE_LOG_FILE"
         else
-            echo "（日志文件不存在: $LOG_FILE）"
+            echo "（日志不存在）"
+        fi
+
+        echo ""
+        echo "=== news-monitor 最近 $LOG_LINES 行 ($NEWS_LOG_FILE) ==="
+        if [[ -f "$NEWS_LOG_FILE" ]]; then
+            tail -"$LOG_LINES" "$NEWS_LOG_FILE"
+        else
+            echo "（日志不存在）"
         fi
         ;;
 
     ensure)
-        # 有活跃警报且未运行 → 启动；无活跃警报 → 不动
-        HAS_ACTIVE=0
-        if [[ -f "$ALERTS_FILE" ]]; then
-            HAS_ACTIVE=$(python3 -c "
-import json
-data = json.load(open('$ALERTS_FILE'))
-active = [a for a in data.get('alerts',[]) if a.get('status')=='active']
-print(len(active))
-" 2>/dev/null || echo 0)
+        # 有活跃警报且对应进程未运行 → 拉起；无活跃警报 → 不动
+        migrate_old_pid
+        PRICE_ACTIVE=$(count_active_by_type "price")
+        NEWS_ACTIVE=$(count_active_by_type "news")
+
+        if [[ "$PRICE_ACTIVE" -gt 0 ]] && ! is_running "$PRICE_PID_FILE"; then
+            echo "[market-watch] $PRICE_ACTIVE 个活跃价格警报，price-monitor 未运行，拉起..."
+            start_price_monitor
         fi
-        if [[ "$HAS_ACTIVE" -gt 0 ]]; then
-            if ! is_running; then
-                echo "[market-watch] $HAS_ACTIVE 个活跃警报，守护进程未运行，正在拉起..."
-                bash "$0" start --agent "$AGENT"
-            fi
+
+        if [[ "$NEWS_ACTIVE" -gt 0 ]] && ! is_running "$NEWS_PID_FILE"; then
+            echo "[market-watch] $NEWS_ACTIVE 个活跃新闻警报，news-monitor 未运行，拉起..."
+            start_news_monitor
         fi
         ;;
 
     *)
         echo "用法: daemon.sh {start|stop|restart|status|log|ensure} [--agent AGENT] [--lines N]"
+        echo ""
+        echo "  start   — 按需启动 price-monitor / news-monitor（有活跃警报才拉起）"
+        echo "  stop    — 停止两个进程"
+        echo "  restart — 停止后重新启动"
+        echo "  status  — 显示两个进程状态和活跃警报"
+        echo "  log     — 显示两个进程的最近日志"
+        echo "  ensure  — 检查并按需拉起（被 watchdog 调用）"
         exit 1
         ;;
 esac

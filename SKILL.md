@@ -9,26 +9,39 @@ description: "Market monitoring and alert system for prices and news. Use when t
 
 | 类型 | 数据源 | 状态 |
 |------|--------|------|
-| **价格盯盘** | WebSocket（Binance/OKX/Bitget/Hyperliquid）+ pytdx（A股）+ CoinGecko fallback | ✅ 已实现 |
-| **新闻盯盘** | RSS/API 关键词匹配 | 🚧 待实现（扩展点已预留） |
+| **价格盯盘** | HTTP 轮询（Binance/Hyperliquid/OKX/Bitget）+ CoinGecko fallback + pytdx（A股） | ✅ 已实现 |
+| **新闻盯盘** | 金十数据、华尔街见闻（HTTP polling）+ CoinDesk/CoinTelegraph/The Block/Decrypt（RSS） | ✅ 已实现 |
 
 ---
 
 ## 数据源和精度
 
+### 价格源
+
 | 来源 | 协议 | 资产 | 延迟 |
 |------|------|------|------|
-| Binance | WebSocket bookTicker | BTC/ETH/SOL/BNB/HYPE | 实时 |
-| OKX | WebSocket tickers | BTC/ETH/SOL/XAUT/HYPE | 实时 |
-| Bitget | WebSocket ticker | BTC/ETH/SOL/HYPE | 实时 |
-| Hyperliquid | WebSocket allMids | HYPE 等所有 HL 资产 | 实时 |
+| Binance | HTTP ticker（5s 轮询） | BTC/ETH/SOL/BNB/HYPE | ~100ms |
+| Hyperliquid | HTTP allMids（5s 轮询） | HYPE 等所有 HL 资产 | ~100ms |
+| OKX | HTTP ticker（5s 轮询） | BTC/ETH/SOL/XAUT/HYPE | ~100ms |
+| Bitget | HTTP ticker（5s 轮询） | BTC/ETH/SOL/HYPE | ~100ms |
 | pytdx | TCP 轮询（盘中 4s） | A股（沪深） | ~200ms |
 | CoinGecko | HTTP 轮询（30s） | 全资产 fallback | 30s |
 
 **Asset → Exchange 优先级:**
-- BTC/ETH/SOL: Binance → OKX → Bitget → CoinGecko
-- HYPE: Hyperliquid → Bitget → OKX → CoinGecko
+- BTC/ETH/SOL: Binance → Hyperliquid → OKX → Bitget → CoinGecko
+- HYPE: Hyperliquid → Binance → OKX → Bitget → CoinGecko
 - XAUT: OKX → CoinGecko
+
+### 新闻源
+
+| 来源 | 类型 | 说明 |
+|------|------|------|
+| 金十数据 | HTTP 轮询 | ⚠️ 非官方接口，格式随时可能变更 |
+| 华尔街见闻 | HTTP 轮询 | ⚠️ 非官方接口，同上 |
+| CoinDesk | RSS 2.0 | 官方 RSS feed |
+| CoinTelegraph | RSS 2.0 | 官方 RSS feed |
+| The Block | RSS 2.0 | 官方 RSS feed |
+| Decrypt | RSS / Atom | 官方 feed |
 
 ---
 
@@ -64,12 +77,13 @@ description: "Market monitoring and alert system for prices and news. Use when t
 }
 ```
 
-**新闻类字段（待实现，扩展点）：**
+**新闻类额外字段：**
 ```json
 {
-  "sources":    ["coindesk-rss", "reuters-rss"],
-  "keywords":   ["ceasefire", "停火", "Iran deal"],
-  "match_mode": "any"          // "any" | "all"
+  "keywords":     ["BTC ETF", "BlackRock", "比特币"],
+  "keyword_mode": "any",       // "any" | "all"
+  "sources":      ["coindesk", "cointelegraph", "jin10"],
+  "poll_interval": 300         // 秒，默认 300
 }
 ```
 
@@ -77,7 +91,7 @@ description: "Market monitoring and alert system for prices and news. Use when t
 
 ## 价格盯盘工作流
 
-### 1. 设置价格警报
+### 设置价格警报
 
 ```bash
 SKILL="$HOME/.openclaw/skills/market-watch/scripts"
@@ -100,39 +114,49 @@ python3 "$SKILL/register-price-alert.py" \
 - `--session-key`: 用户的当前 session key（稳定标识，用于触发时找到正确 session）
 - `--reply-to`: 飞书通知目标，格式 `user:ou_xxx`
 
-### 2. 启动守护进程
-
-```bash
-bash "$HOME/.openclaw/skills/market-watch/scripts/daemon.sh" start --agent laok
-```
-
-守护进程启动后：
-- 自动连接 4 个交易所 WebSocket（Binance/OKX/Bitget/Hyperliquid）
-- 启动 CoinGecko 30s fallback 轮询
-- 如果有 A股警报，启动 pytdx 盘中轮询（4s）
-- 每秒检查活跃警报，触达则通知
-
-### 3. 查看和取消警报
-
-```bash
-python3 "$SKILL/cancel-alert.py" --agent laok --list            # 列出全部活跃警报
-python3 "$SKILL/cancel-alert.py" --agent laok --id eth-1741234 # 按 ID 取消
-python3 "$SKILL/cancel-alert.py" --agent laok --asset ETH       # 取消资产所有警报
-python3 "$SKILL/cancel-alert.py" --agent laok --type price      # 取消所有价格警报
-python3 "$SKILL/cancel-alert.py" --agent laok --all             # 取消全部
-```
-
 ---
 
-## 新闻盯盘（待实现）
+## 新闻盯盘工作流
 
-新闻监控将由以下组件承接，预留扩展点：
+### 设置新闻关键词警报
 
-- **`register-news-alert.py`** — 注册关键词/信源警报（待实现）
-- **`news-monitor.py`** — RSS/API 扫描，关键词匹配（待实现）
-- **`daemon.sh`** — 已支持扩展，统一进程管理
+```bash
+# 基础用法：监控任一关键词命中
+python3 "$SKILL/register-news-alert.py" \
+  --agent laok \
+  --keywords "BTC ETF,BlackRock,ETF通过" \
+  --keyword-mode any \
+  --context-summary "盯 ETF 审批进展，可能触发价格上涨" \
+  --session-key "agent:laok:feishu:direct:ou_xxx" \
+  --reply-channel feishu \
+  --reply-to "user:ou_xxx"
 
-触发机制、通知回路与价格盯盘完全一致，共用 `market-alerts.json` 文件（通过 `type: "news"` 区分）。
+# 一次性警报（发现即停，适合等待明确事件）
+python3 "$SKILL/register-news-alert.py" \
+  --agent laok \
+  --keywords "停火,ceasefire,Iran deal" \
+  --one-shot \
+  --context-summary "等停火消息，判断是否影响风险资产"
+
+# 仅监控特定来源
+python3 "$SKILL/register-news-alert.py" \
+  --agent laok \
+  --keywords "HYPE,Hyperliquid" \
+  --sources "coindesk,cointelegraph,theblock,decrypt"
+
+# 全部命中模式（需要所有关键词同时出现在同一条新闻中）
+python3 "$SKILL/register-news-alert.py" \
+  --agent laok \
+  --keywords "BTC,ETF,SEC" \
+  --keyword-mode all
+```
+
+**参数说明：**
+- `--keywords`: 关键词，逗号分隔（支持中英文）
+- `--keyword-mode`: `any`（任一命中）| `all`（全部命中），默认 `any`
+- `--sources`: 数据源，逗号分隔，可选：`jin10, wallstreetcn, coindesk, cointelegraph, theblock, decrypt`（默认全部）
+- `--poll-interval`: 轮询间隔（秒），默认 300（5分钟）
+- `--one-shot`: 触发一次后自动停止（新闻警报默认持续监控）
 
 ---
 
@@ -141,18 +165,34 @@ python3 "$SKILL/cancel-alert.py" --agent laok --all             # 取消全部
 ```bash
 DAEMON="$HOME/.openclaw/skills/market-watch/scripts/daemon.sh"
 
-bash "$DAEMON" start    # 启动（连接 WebSocket + 开始轮询）
-bash "$DAEMON" stop     # 停止
-bash "$DAEMON" restart  # 重启（重建所有 WS 连接）
+bash "$DAEMON" start    # 按需启动（检查活跃警报类型，只启动需要的进程）
+bash "$DAEMON" stop     # 停止两个进程
+bash "$DAEMON" restart  # 重启
 bash "$DAEMON" status   # 状态 + 活跃警报列表
-bash "$DAEMON" log      # 最近 40 行日志
+bash "$DAEMON" log      # 两个进程的最近 40 行日志
 bash "$DAEMON" log --lines 100  # 更多日志
 ```
 
 **文件路径:**
-- PID：`/tmp/market-watch-{agent}.pid`
-- 日志：`/tmp/market-watch-{agent}.log`
-- 警报：`~/.openclaw/agents/{agent}/private/market-alerts.json`
+- 价格进程 PID：`/tmp/market-watch-{agent}-price.pid`
+- 新闻进程 PID：`/tmp/market-watch-{agent}-news.pid`
+- 价格日志：`/tmp/market-watch-{agent}.log`
+- 新闻日志：`/tmp/market-watch-{agent}-news.log`
+- 警报数据：`~/.openclaw/agents/{agent}/private/market-alerts.json`
+- 新闻去重：`~/.openclaw/agents/{agent}/private/news-monitor-state.json`
+
+---
+
+## 查看和取消警报
+
+```bash
+python3 "$SKILL/cancel-alert.py" --agent laok --list            # 列出全部活跃警报
+python3 "$SKILL/cancel-alert.py" --agent laok --id eth-1741234  # 按 ID 取消
+python3 "$SKILL/cancel-alert.py" --agent laok --asset ETH       # 取消资产所有警报
+python3 "$SKILL/cancel-alert.py" --agent laok --type price      # 取消所有价格警报
+python3 "$SKILL/cancel-alert.py" --agent laok --type news       # 取消所有新闻警报
+python3 "$SKILL/cancel-alert.py" --agent laok --all             # 取消全部
+```
 
 ---
 
@@ -168,10 +208,24 @@ bash "$DAEMON" log --lines 100  # 更多日志
 
 ---
 
+## 收到 `[NEWS_ALERT 触发]` 时
+
+注入消息格式：`[NEWS_ALERT 触发 · 请处理后联系用户]`
+
+处理步骤：
+1. 读取 `context_summary`（设置时记录的背景和意图）
+2. 注意消息里的命中关键词、来源、新闻标题
+3. **以自己的口吻主动告知用户**：发现了相关新闻
+4. 简要判断这条新闻的影响，询问是否需要操作
+
+---
+
 ## 注意事项
 
-- **新增非常规资产**（如 PEPE）：restart 守护进程，WS 连接不自动热更新
-- **HYPE**: 优先用 Hyperliquid WS，allMids 包含 HYPE 现货 mid price
-- **XAUT**: 仅 OKX 有，且 OKX WS 可能因地区限制连接失败，CoinGecko 兜底
+- **非标资产（如 PEPE）**：在 `price-monitor.py` 的 `ASSET_EXCHANGES` 中添加，restart daemon
+- **HYPE**: 优先用 Hyperliquid HTTP，allMids 包含 HYPE 现货 mid price
+- **XAUT**: 仅 OKX 有，可能因地区限制失败，CoinGecko 兜底
 - **A股**: 只在交易时段（9:30-11:30 / 13:00-15:00）轮询，非交易时段自动跳过
-- **pytdx**: 纯 TCP 请求-响应协议，无推送能力，4s 轮询是合理下限
+- **金十/华尔街见闻**: 非官方接口，接口变更时 monitor 会静默跳过，不影响 RSS 源继续工作
+- **新闻警报默认持续监控**：不会自动停止，需要手动 cancel 或设置 `--one-shot`
+- **价格警报默认一次性触发**：触发后标记 triggered，停止监控

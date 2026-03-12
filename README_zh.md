@@ -4,7 +4,7 @@
 
 **给 OpenClaw agent 用的实时行情监控与警报系统。**
 
-监控加密货币价格（BTC、ETH、SOL、HYPE、XAUT 等）和 A 股行情，当价格触达设定条件时，自动通知 agent，由 agent 主动联系用户。
+通过 HTTP 轮询监控加密货币价格（BTC、ETH、SOL、HYPE、XAUT 等）和 A 股行情，同时监控金十数据、华尔街见闻、CoinDesk、CoinTelegraph、The Block、Decrypt 等新闻源的关键词命中。当价格触达条件或新闻命中关键词时，自动通知 agent，由 agent 主动联系用户。
 
 > 这是一个 [OpenClaw](https://github.com/openclaw) AgentSkill，任何 OpenClaw agent 即插即用。
 
@@ -16,8 +16,8 @@
 |------|------|
 | **价格警报** — HTTP 轮询 Binance / Hyperliquid / OKX / Bitget / CoinGecko | ✅ |
 | **A 股警报** — pytdx TCP 轮询（盘中 4 秒间隔） | ✅ |
+| **新闻警报** — 金十、华尔街见闻、CoinDesk、CoinTelegraph、The Block、Decrypt | ✅ |
 | **守护进程管理** — 后台运行，launchd 看门狗自动重启 | ✅ |
-| **新闻警报** — RSS / API 关键词匹配 | 🚧 规划中 |
 
 ---
 
@@ -46,33 +46,62 @@ python3 "$SKILL/register-price-alert.py" \
   --reply-to "user:ou_xxx"
 ```
 
+### 3. 注册新闻警报
+
+```bash
+python3 "$SKILL/register-news-alert.py" \
+  --agent your-agent-id \
+  --keywords "BTC ETF,BlackRock,比特币" \
+  --keyword-mode any \
+  --sources "coindesk,cointelegraph,jin10" \
+  --context-summary "盯 ETF 审批进展，可能触发价格波动" \
+  --session-key "agent:your-agent:feishu:direct:ou_xxx" \
+  --reply-channel feishu \
+  --reply-to "user:ou_xxx"
+
+# 一次性（发现一条就停，适合等待明确事件）
+python3 "$SKILL/register-news-alert.py" \
+  --agent your-agent-id \
+  --keywords "停火,ceasefire,Iran deal" \
+  --one-shot \
+  --context-summary "等停火消息，判断是否影响风险资产"
+
+# 只盯 RSS 源（不用金十/华尔街见闻）
+python3 "$SKILL/register-news-alert.py" \
+  --agent your-agent-id \
+  --keywords "HYPE,Hyperliquid" \
+  --sources "coindesk,cointelegraph,theblock,decrypt"
+```
+
 > 注册后自动拉起守护进程，无需手动启动。
 
-### 3. 手动管理守护进程
+### 4. 手动管理守护进程
 
 ```bash
 DAEMON="$HOME/.openclaw/skills/market-watch/scripts/daemon.sh"
 
-bash "$DAEMON" start   --agent your-agent-id   # 启动
-bash "$DAEMON" stop    --agent your-agent-id   # 停止
-bash "$DAEMON" status  --agent your-agent-id   # 查看状态
-bash "$DAEMON" log     --agent your-agent-id   # 查看日志
+bash "$DAEMON" start   --agent your-agent-id   # 按需启动（检查活跃警报类型）
+bash "$DAEMON" stop    --agent your-agent-id   # 停止两个进程
+bash "$DAEMON" status  --agent your-agent-id   # 查看两个进程状态
+bash "$DAEMON" log     --agent your-agent-id   # 查看两个进程日志
 ```
 
-### 4. 取消警报
+### 5. 取消警报
 
 ```bash
 SCRIPT="$HOME/.openclaw/skills/market-watch/scripts/cancel-alert.py"
 
-python3 "$SCRIPT" --agent your-agent-id --list             # 列出活跃警报
-python3 "$SCRIPT" --agent your-agent-id --id eth-1741234   # 按 ID 取消
-python3 "$SCRIPT" --agent your-agent-id --asset ETH        # 取消所有 ETH 警报
-python3 "$SCRIPT" --agent your-agent-id --all              # 取消全部
+python3 "$SCRIPT" --agent your-agent-id --list              # 列出活跃警报
+python3 "$SCRIPT" --agent your-agent-id --id eth-1741234    # 按 ID 取消
+python3 "$SCRIPT" --agent your-agent-id --asset ETH         # 取消所有 ETH 警报
+python3 "$SCRIPT" --agent your-agent-id --type price        # 取消所有价格警报
+python3 "$SCRIPT" --agent your-agent-id --type news         # 取消所有新闻警报
+python3 "$SCRIPT" --agent your-agent-id --all               # 取消全部
 ```
 
-### 5.（macOS）安装看门狗
+### 6.（macOS）安装看门狗
 
-每 5 分钟检查一次，崩溃后自动重启守护进程：
+每 5 分钟检查一次，崩溃后自动重启：
 
 ```bash
 bash "$HOME/.openclaw/skills/market-watch/scripts/install-watchdog.sh" install --agent your-agent-id
@@ -82,13 +111,15 @@ bash "$HOME/.openclaw/skills/market-watch/scripts/install-watchdog.sh" install -
 
 ## 数据源
 
+### 价格数据
+
 | 交易所 | 协议 | 支持资产 | 延迟 |
 |--------|------|---------|------|
-| Binance | HTTP ticker | BTC, ETH, SOL, BNB, HYPE | ~100ms |
-| Hyperliquid | HTTP allMids | HYPE + 全部 HL 上线资产 | ~100ms |
-| OKX | HTTP ticker | BTC, ETH, SOL, XAUT, HYPE | ~100ms |
-| Bitget | HTTP ticker | BTC, ETH, SOL, HYPE | ~100ms |
-| CoinGecko | HTTP 轮询（30s） | 兜底覆盖 | ~30s |
+| Binance | HTTP ticker（5s 轮询） | BTC, ETH, SOL, BNB, HYPE | ~100ms |
+| Hyperliquid | HTTP allMids（5s 轮询） | HYPE + 全部 HL 上线资产 | ~100ms |
+| OKX | HTTP ticker（5s 轮询） | BTC, ETH, SOL, XAUT, HYPE | ~100ms |
+| Bitget | HTTP ticker（5s 轮询） | BTC, ETH, SOL, HYPE | ~100ms |
+| CoinGecko | HTTP 轮询（30s 兜底） | 全资产 fallback | ~30s |
 | pytdx | TCP 请求-响应 | A 股（沪深） | ~200ms |
 
 **取价优先级（逐级降级）：**
@@ -97,51 +128,69 @@ bash "$HOME/.openclaw/skills/market-watch/scripts/install-watchdog.sh" install -
 - XAUT：OKX → CoinGecko
 - A 股（如 `601899`）：仅 pytdx（交易时段：周一至周五 9:30–11:30 / 13:00–15:00）
 
+### 新闻数据
+
+| 来源 | 类型 | 说明 |
+|------|------|------|
+| 金十数据 | HTTP 轮询 | ⚠️ 非官方接口，格式随时可能变更 |
+| 华尔街见闻 | HTTP 轮询 | ⚠️ 非官方接口，同上 |
+| CoinDesk | RSS feed | `https://www.coindesk.com/arc/outboundfeeds/rss/` |
+| CoinTelegraph | RSS feed | `https://cointelegraph.com/rss` |
+| The Block | RSS feed | `https://www.theblock.co/rss.xml` |
+| Decrypt | RSS feed | `https://decrypt.co/feed` |
+
+> ⚠️ **金十和华尔街见闻是非官方接口。** 可能随时加防爬或改变响应格式。代码内置降级处理：某一源失败时，其余数据源继续正常工作。
+
 ---
 
 ## 架构
 
 ```
-┌─────────────────────────────────────────────────────┐
-│                  AI Agent（OpenClaw）                │
-│         调用 register-price-alert.py 注册警报       │
-└───────────────────────────┬─────────────────────────┘
-                            │ 写入 alert 到 JSON
-                            ▼
-┌─────────────────────────────────────────────────────┐
-│         market-alerts.json（共享状态文件）            │
-│    ~/.openclaw/agents/{agent}/private/               │
-└───────────────────────────┬─────────────────────────┘
-                            │ 每 5 秒读取
-                            ▼
-┌─────────────────────────────────────────────────────┐
-│            price-monitor.py（守护进程）              │
-│                                                     │
-│  HTTP 轮询（5s）：                                   │
-│    Binance → Hyperliquid → OKX → Bitget → CoinGecko │
-│  A 股轮询（4s，盘中）：                              │
-│    pytdx TCP → 备用服务器                            │
-│                                                     │
-│  条件触达时：                                        │
-│    openclaw agent --deliver → 发送 MARKET_ALERT     │
-└─────────────────────────────────────────────────────┘
-                            │
-                            ▼
-┌─────────────────────────────────────────────────────┐
-│               Agent session 收到：                   │
-│  [MARKET_ALERT 触发 · 请处理后联系用户]              │
-│  • 当前价格 + 触达的条件                             │
-│  • 注册时记录的 context_summary                      │
-│  • transcript_file 路径用于完整上下文回溯            │
-└─────────────────────────────────────────────────────┘
+┌────────────────────────────────────────────────────────────────┐
+│                    AI Agent（OpenClaw）                         │
+│  register-price-alert.py / register-news-alert.py             │
+└──────────────────────────┬─────────────────────────────────────┘
+                           │ 写入 alert 到 JSON
+                           ▼
+┌────────────────────────────────────────────────────────────────┐
+│         market-alerts.json（共享状态文件）                      │
+│    ~/.openclaw/agents/{agent}/private/                         │
+└─────────┬─────────────────────────────────────┬───────────────┘
+          │ 每 5 秒读取                          │ 每 5 分钟读取
+          ▼                                      ▼
+┌─────────────────────┐         ┌──────────────────────────────┐
+│  price-monitor.py   │         │  news-monitor.py              │
+│  （守护进程）        │         │  （守护进程）                 │
+│                     │         │                               │
+│  HTTP 轮询 5s：     │         │  HTTP 轮询（默认 5min）：     │
+│  Binance → HL       │         │  金十 / 华尔街见闻            │
+│  → OKX → Bitget     │         │  CoinDesk / CoinTelegraph    │
+│  → CoinGecko        │         │  The Block / Decrypt         │
+│                     │         │                               │
+│  A 股 4s（盘中）：  │         │  关键词匹配（any/all）        │
+│  pytdx TCP          │         │  hash 去重（滚动窗口 1000）   │
+└──────────┬──────────┘         └──────────────┬───────────────┘
+           │                                   │
+           └─────────────┬─────────────────────┘
+                         │ openclaw agent --deliver
+                         ▼
+┌────────────────────────────────────────────────────────────────┐
+│                  Agent session 收到：                           │
+│  [MARKET_ALERT 触发] / [NEWS_ALERT 触发]                      │
+│  • 触达条件 / 命中关键词 + 来源                                │
+│  • 注册时的 context_summary                                    │
+│  • transcript_file 路径用于完整上下文回溯                      │
+└────────────────────────────────────────────────────────────────┘
 ```
 
 **关键设计决策：**
 
 - **HTTP 轮询而非 WebSocket** — 省代理流量，重连逻辑简单，无状态
 - **JSON 文件共享状态** — 零 IPC 复杂度，agent 和 daemon 通过文件系统通信
-- **无活跃警报自动退出** — daemon 按需拉起，不常驻
-- **默认一次性触发** — 触发后标记 `triggered`，停止监控
+- **无活跃警报自动退出** — 两个 daemon 各自独立按需拉起，不常驻
+- **价格警报：默认一次性触发** — 触发后标记 `triggered`，停止监控
+- **新闻警报：默认持续监控** — 不断扫描直到取消或设置 `--one-shot`
+- **hash 去重滚动窗口** — 每个警报保留最近 1000 个 hash，防止内存无限增长
 - **上下文回溯** — alert 携带 `transcript_file` + `transcript_msg_id`，agent 可精确还原用户意图
 
 ---
@@ -150,17 +199,19 @@ bash "$HOME/.openclaw/skills/market-watch/scripts/install-watchdog.sh" install -
 
 ```
 market-watch/
-├── SKILL.md                      # OpenClaw agent 指令（agent 运行时自动加载）
-├── README.md                     # 英文说明
-├── README_zh.md                  # 本文件
+├── SKILL.md                        # OpenClaw agent 指令（agent 运行时自动加载）
+├── README.md                       # 英文说明
+├── README_zh.md                    # 本文件
 ├── scripts/
-│   ├── register-price-alert.py  # 注册价格警报 + 自动拉起 daemon
-│   ├── cancel-alert.py          # 列出 / 取消活跃警报
-│   ├── price-monitor.py         # 后台守护进程 — 取价、检查条件
-│   ├── daemon.sh                # 进程生命周期管理：start / stop / restart / status / log
-│   └── install-watchdog.sh      # macOS launchd 看门狗（崩溃自动重启）
+│   ├── register-price-alert.py    # 注册价格警报 + 自动拉起 daemon
+│   ├── register-news-alert.py     # 注册新闻关键词警报 + 自动拉起 daemon
+│   ├── cancel-alert.py            # 列出 / 取消活跃警报（支持 --type news）
+│   ├── price-monitor.py           # 后台守护进程 — 取价、检查条件
+│   ├── news-monitor.py            # 后台守护进程 — 抓新闻、关键词匹配
+│   ├── daemon.sh                  # 进程生命周期：start/stop/restart/status/log/ensure
+│   └── install-watchdog.sh        # macOS launchd 看门狗（崩溃自动重启）
 └── references/
-    └── exchange-api.md          # 各交易所 API 参考
+    └── exchange-api.md            # 交易所和新闻源 HTTP API 参考
 ```
 
 ---
@@ -169,47 +220,59 @@ market-watch/
 
 警报存储在 `~/.openclaw/agents/{agent}/private/market-alerts.json`：
 
+### 价格警报
 ```json
 {
-  "alerts": [
-    {
-      "id":                "eth-1741234567",
-      "type":              "price",
-      "status":            "active",
-      "asset":             "ETH",
-      "market":            "crypto",
-      "condition":         ">=",
-      "target_price":      2150,
-      "one_shot":          true,
-      "context_summary":   "ETH 减仓窗口：卖 3.5 枚 ETH 换 HYPE",
-      "session_key":       "agent:your-agent:feishu:direct:ou_xxx",
-      "agent_id":          "your-agent",
-      "reply_channel":     "feishu",
-      "reply_to":          "user:ou_xxx",
-      "created_at":        "2026-03-12T13:00:00"
-    }
-  ]
+  "id":                "eth-1741234567",
+  "type":              "price",
+  "status":            "active",
+  "asset":             "ETH",
+  "market":            "crypto",
+  "condition":         ">=",
+  "target_price":      2150,
+  "one_shot":          true,
+  "context_summary":   "ETH 减仓窗口：卖 3.5 枚 ETH 换 HYPE",
+  "session_key":       "agent:your-agent:feishu:direct:ou_xxx",
+  "agent_id":          "your-agent",
+  "reply_channel":     "feishu",
+  "reply_to":          "user:ou_xxx",
+  "created_at":        "2026-03-12T13:00:00"
 }
 ```
 
-**状态流转：** `active` → `triggered`（条件触达）| `cancelled`（手动取消）
+### 新闻警报
+```json
+{
+  "id":                "news-1741234567",
+  "type":              "news",
+  "status":            "active",
+  "keywords":          ["BTC ETF", "BlackRock", "比特币"],
+  "keyword_mode":      "any",
+  "sources":           ["coindesk", "cointelegraph", "jin10"],
+  "poll_interval":     300,
+  "one_shot":          false,
+  "context_summary":   "盯 ETF 审批进展",
+  "session_key":       "agent:your-agent:feishu:direct:ou_xxx",
+  "agent_id":          "your-agent",
+  "reply_channel":     "feishu",
+  "reply_to":          "user:ou_xxx",
+  "created_at":        "2026-03-12T13:00:00"
+}
+```
+
+**状态流转：** `active` → `triggered`（条件触达 / 关键词命中）| `cancelled`（手动取消）
 
 ---
 
 ## 给 AI Agent 的指引
 
-本 skill 附带 `SKILL.md`，OpenClaw agent 运行时会自动加载。运行时不需要读这个 README，`SKILL.md` 是你的参考。
+本 skill 附带 `SKILL.md`，OpenClaw agent 运行时会自动加载。运行时不需要读这个 README。
 
 **什么时候激活：**
 - 用户说"帮我盯 BTC"、"ETH 到 2150 通知我"、"set a price alert"
+- 用户说"帮我盯 ETF 相关新闻"、"停火消息出来通知我"、"monitor BlackRock news"
 - 用户要取消或查看当前警报
-- 你收到 `[MARKET_ALERT 触发]` 消息
-
-**触发流程：**
-1. 从对话中提取资产、条件、目标价、用户意图
-2. 调用 `register-price-alert.py`，`--context-summary` 记录用户意图
-3. 回复用户："设好了，[资产] [条件] [目标价] 到了通知你。"
-4. 收到 `[MARKET_ALERT 触发]` 时：读 `context_summary`，必要时回溯 `transcript_file`，主动联系用户
+- 收到 `[MARKET_ALERT 触发]` 或 `[NEWS_ALERT 触发]`
 
 **添加非标资产（如 PEPE、新上线币种）：**
 - 在 `price-monitor.py` 的 `ASSET_EXCHANGES` 中添加资产
@@ -223,8 +286,11 @@ market-watch/
 | 文件 | 路径 | 说明 |
 |------|------|------|
 | 警报数据库 | `~/.openclaw/agents/{agent}/private/market-alerts.json` | 共享警报状态 |
-| PID 文件 | `/tmp/market-watch-{agent}.pid` | 守护进程 PID |
-| 日志文件 | `/tmp/market-watch-{agent}.log` | 轮转日志（上限 512KB × 3） |
+| 新闻去重状态 | `~/.openclaw/agents/{agent}/private/news-monitor-state.json` | hash 去重窗口 |
+| 价格进程 PID | `/tmp/market-watch-{agent}-price.pid` | price-monitor PID |
+| 新闻进程 PID | `/tmp/market-watch-{agent}-news.pid` | news-monitor PID |
+| 价格日志 | `/tmp/market-watch-{agent}.log` | 轮转日志（512KB × 3） |
+| 新闻日志 | `/tmp/market-watch-{agent}-news.log` | 轮转日志（512KB × 4） |
 | 看门狗配置 | `~/Library/LaunchAgents/com.openclaw.market-watch.{agent}.plist` | macOS launchd 配置 |
 
 ---
