@@ -18,6 +18,12 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
+# N-03: AGENT 格式校验（与 daemon.sh 一致）
+if [[ ! "$AGENT" =~ ^[a-zA-Z0-9_-]+$ ]]; then
+    echo "Error: invalid --agent value: '$AGENT' (only alphanumeric, dash, underscore allowed)" >&2
+    exit 1
+fi
+
 SKILL_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 DAEMON_SH="$SKILL_DIR/scripts/daemon.sh"
 LABEL="com.openclaw.market-watch.${AGENT}"

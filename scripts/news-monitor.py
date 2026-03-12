@@ -415,8 +415,8 @@ def fire_news_alert_batch(
     deliver_message(alert, msg)
 
 
-def notify_failure(agent_id: str, minutes: int) -> None:
-    """连续抓取失败超过阈值，通知 agent"""
+def notify_failure(agent_id: str, alerts_file: Path, minutes: int) -> None:
+    """连续抓取失败超过阈值，通知 agent（N-02: 从活跃警报读取路由信息）"""
     msg = (
         f"[NEWS_ALERT · 系统异常]\n\n"
         f"新闻监控已连续 {minutes} 分钟无法从任何数据源获取数据。\n"
@@ -425,8 +425,17 @@ def notify_failure(agent_id: str, minutes: int) -> None:
         f"1. 告知用户新闻监控程序取数异常\n"
         f"2. 检查网络和代理状态"
     )
-    # 无具体 alert 路由，用最小路由（仅 agent_id）
-    deliver_message({"agent_id": agent_id}, msg)
+    route_alert: dict = {"agent_id": agent_id}
+    try:
+        if alerts_file.exists():
+            data = json.loads(alerts_file.read_text())
+            active = [a for a in data.get("alerts", [])
+                      if a.get("status") == "active" and a.get("type") == "news"]
+            if active:
+                route_alert = active[0]
+    except Exception:
+        pass
+    deliver_message(route_alert, msg)
 
 
 # ── 状态管理 ──────────────────────────────────────────────────────────────────
@@ -538,7 +547,7 @@ def run(agent_id: str, alerts_file: Path, state_file: Path) -> None:
                 consecutive_fail_since = time.time()
             elapsed_fail = time.time() - consecutive_fail_since
             if elapsed_fail >= FAILURE_ALERT_SEC and not failure_notified:
-                notify_failure(agent_id, int(elapsed_fail / 60))
+                notify_failure(agent_id, alerts_file, int(elapsed_fail / 60))
                 failure_notified = True
 
         # ── 加载去重状态 ──────────────────────────────────────────────────────

@@ -21,12 +21,13 @@ register-price-alert.py — 注册价格警报
 
 import argparse
 import json
-import os
 import sys
-import tempfile
 from datetime import datetime
 from pathlib import Path
 from uuid import uuid4
+
+sys.path.insert(0, str(Path(__file__).parent))
+from common import atomic_write_json
 
 
 def get_transcript_info(agent_id: str) -> tuple[str, str]:
@@ -112,13 +113,8 @@ def main() -> str:
 
     data["alerts"].append(alert)
 
-    # S-02: 原子替换写入，防并发损坏
-    with tempfile.NamedTemporaryFile(
-        "w", dir=str(alerts_path.parent), delete=False, suffix=".tmp", encoding="utf-8",
-    ) as f:
-        json.dump(data, f, indent=2, ensure_ascii=False)
-        tmp = f.name
-    os.replace(tmp, str(alerts_path))
+    # S-02: 原子替换写入，防并发损坏（N-01: 复用 common.py）
+    atomic_write_json(alerts_path, data)
 
     # 统计活跃警报数量
     active_count = sum(1 for a in data["alerts"] if a.get("status") == "active")
