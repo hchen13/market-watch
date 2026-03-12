@@ -1,5 +1,6 @@
 ---
 name: "market-watch"
+version: "1.1.0"
 description: "Market monitoring and alert system for prices and news. Use when the user asks to watch a price, monitor market conditions, get notified when an asset hits a target, or keep an eye on breaking news. Covers crypto (BTC/ETH/HYPE/SOL/XAUT etc.) and A-shares (real-time via TongDaXin)."
 ---
 
@@ -20,7 +21,7 @@ description: "Market monitoring and alert system for prices and news. Use when t
 
 | 来源 | 协议 | 资产 | 延迟 |
 |------|------|------|------|
-| Binance | HTTP ticker（5s 轮询） | BTC/ETH/SOL/BNB/HYPE | ~100ms |
+| Binance | HTTP ticker（5s 轮询） | BTC/ETH/SOL/BNB | ~100ms |
 | Hyperliquid | HTTP allMids（5s 轮询） | HYPE 等所有 HL 资产 | ~100ms |
 | OKX | HTTP ticker（5s 轮询） | BTC/ETH/SOL/XAUT/HYPE | ~100ms |
 | Bitget | HTTP ticker（5s 轮询） | BTC/ETH/SOL/HYPE | ~100ms |
@@ -29,7 +30,7 @@ description: "Market monitoring and alert system for prices and news. Use when t
 
 **Asset → Exchange 优先级:**
 - BTC/ETH/SOL: Binance → Hyperliquid → OKX → Bitget → CoinGecko
-- HYPE: Hyperliquid → Binance → OKX → Bitget → CoinGecko
+- HYPE: Hyperliquid → OKX → Bitget → CoinGecko（Binance 无 HYPEUSDT 交易对）
 - XAUT: OKX → CoinGecko
 
 ### 新闻源
@@ -113,6 +114,7 @@ python3 "$SKILL/register-price-alert.py" \
 - `--condition`: `>=` / `<=` / `>` / `<`
 - `--session-key`: 用户的当前 session key（稳定标识，用于触发时找到正确 session）
 - `--reply-to`: 飞书通知目标，格式 `user:ou_xxx`
+- `--transcript-msg-id`: **推荐填入**当前对话的 message_id（触发时用于追溯设盘上下文）。agent 在注册警报时应传入当前消息的 ID，否则触发通知中「消息ID」字段将为空，无法精准跳转到设盘时的对话记录。
 
 ---
 
@@ -223,7 +225,7 @@ python3 "$SKILL/cancel-alert.py" --agent laok --all             # 取消全部
 ## 注意事项
 
 - **非标资产（如 PEPE）**：在 `price-monitor.py` 的 `ASSET_EXCHANGES` 中添加，restart daemon
-- **HYPE**: 优先用 Hyperliquid HTTP，allMids 包含 HYPE 现货 mid price
+- **HYPE**: 优先用 Hyperliquid HTTP（allMids 含 HYPE 现货 mid price）→ OKX → Bitget → CoinGecko。Binance 不存在 HYPEUSDT 交易对，已从代码中移除
 - **XAUT**: 仅 OKX 有，可能因地区限制失败，CoinGecko 兜底
 - **A股**: 只在交易时段（9:30-11:30 / 13:00-15:00）轮询，非交易时段自动跳过
 - **金十/华尔街见闻**: 非官方接口，接口变更时 monitor 会静默跳过，不影响 RSS 源继续工作

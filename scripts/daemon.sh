@@ -28,6 +28,12 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
+# M-02: 校验 AGENT 名称，防止含空格或特殊字符时注入 Shell/Python 命令
+if [[ ! "$AGENT" =~ ^[a-zA-Z0-9_-]+$ ]]; then
+    echo "Error: invalid --agent value: '$AGENT' (only alphanumeric, _ and - allowed)" >&2
+    exit 1
+fi
+
 SKILL_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PRICE_MONITOR_PY="$SKILL_DIR/scripts/price-monitor.py"
 NEWS_MONITOR_PY="$SKILL_DIR/scripts/news-monitor.py"

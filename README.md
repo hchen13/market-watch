@@ -102,7 +102,7 @@ bash "$HOME/.openclaw/skills/market-watch/scripts/install-watchdog.sh" install -
 
 | Exchange | Protocol | Assets | Latency |
 |----------|----------|--------|---------|
-| Binance | HTTP ticker (polling 5s) | BTC, ETH, SOL, BNB, HYPE | ~100ms |
+| Binance | HTTP ticker (polling 5s) | BTC, ETH, SOL, BNB | ~100ms |
 | Hyperliquid | HTTP allMids (polling 5s) | HYPE + all HL-listed assets | ~100ms |
 | OKX | HTTP ticker (polling 5s) | BTC, ETH, SOL, XAUT, HYPE | ~100ms |
 | Bitget | HTTP ticker (polling 5s) | BTC, ETH, SOL, HYPE | ~100ms |
@@ -111,7 +111,7 @@ bash "$HOME/.openclaw/skills/market-watch/scripts/install-watchdog.sh" install -
 
 **Asset priority (best-to-fallback):**
 - BTC / ETH / SOL: Binance → Hyperliquid → OKX → Bitget → CoinGecko
-- HYPE: Hyperliquid → Binance → OKX → Bitget → CoinGecko
+- HYPE: Hyperliquid → OKX → Bitget → CoinGecko (no HYPEUSDT on Binance)
 - XAUT: OKX → CoinGecko
 - A-shares (e.g. `600519`): pytdx only (market hours: Mon–Fri 9:30–11:30 / 13:00–15:00 CST)
 

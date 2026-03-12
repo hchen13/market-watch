@@ -16,6 +16,7 @@ news-monitor.py — 新闻盯盘守护进程
   - 关键词匹配：大小写不敏感，支持中英文
     keyword_mode: "any"（任一命中）| "all"（全部命中）
   - 命中后：openclaw agent --deliver 通知（复用 price-monitor 通知管道）
+  - 单轮多命中时聚合为一条通知（M-04）
   - 无活跃 news alert 时自动退出并清理 PID 文件
   - 日志：RotatingFileHandler（512KB × 3）
 
@@ -29,13 +30,17 @@ import hashlib
 import json
 import logging
 import re
-import subprocess
+import sys
 import time
 import xml.etree.ElementTree as ET
 from datetime import datetime
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from typing import Optional
+
+# 公共工具（deliver_message / atomic_write_json）
+sys.path.insert(0, str(Path(__file__).parent))
+from common import deliver_message, atomic_write_json  # noqa: E402
 
 try:
     import requests
@@ -338,21 +343,6 @@ def keywords_match(item: dict, keywords: list[str], mode: str) -> list[str]:
 
 # ── 通知 ──────────────────────────────────────────────────────────────────────
 
-def get_session_uuid(session_key: str, agent_id: str) -> Optional[str]:
-    try:
-        result = subprocess.run(
-            ["openclaw", "sessions", "--agent", agent_id, "--json"],
-            capture_output=True, text=True, timeout=10,
-        )
-        data = json.loads(result.stdout)
-        for s in data.get("sessions", []):
-            if s.get("key") == session_key:
-                return s.get("sessionId")
-    except Exception:
-        pass
-    return None
-
-
 SOURCE_DISPLAY = {
     "jin10":         "金十数据",
     "wallstreetcn":  "华尔街见闻",
@@ -364,12 +354,8 @@ SOURCE_DISPLAY = {
 
 
 def fire_news_alert(alert: dict, item: dict, matched_keywords: list[str]) -> None:
-    agent_id      = alert.get("agent_id", "laok")
-    session_key   = alert.get("session_key", "")
-    reply_channel = alert.get("reply_channel", "feishu")
-    reply_to      = alert.get("reply_to", "")
-    ts            = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    source_name   = SOURCE_DISPLAY.get(item["source"], item["source"])
+    ts          = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    source_name = SOURCE_DISPLAY.get(item["source"], item["source"])
 
     msg = (
         f"[NEWS_ALERT 触发 · 请处理后联系用户]\n\n"
@@ -387,20 +373,46 @@ def fire_news_alert(alert: dict, item: dict, matched_keywords: list[str]) -> Non
         f"3. 结合当前市场给出简要判断或建议，询问是否需要操作"
     )
 
-    session_uuid = get_session_uuid(session_key, agent_id) if session_key else None
-
-    cmd = ["openclaw", "agent", "--deliver", "--reply-account", agent_id,
-           "--reply-channel", reply_channel]
-    if reply_to:
-        cmd += ["--reply-to", reply_to]
-    if session_uuid:
-        cmd += ["--session-id", session_uuid]
-    else:
-        cmd += ["--agent", agent_id]
-    cmd += ["--message", msg]
-
     log.info(f"🔔 NEWS_ALERT: [{item['source']}] {item['title'][:60]} | kw={matched_keywords}")
-    subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    deliver_message(alert, msg)
+
+
+def fire_news_alert_batch(
+    alert: dict, matches: list[tuple[dict, list[str]]]
+) -> None:
+    """
+    M-04: 单轮多命中时聚合为一条通知，避免通知轰炸。
+    格式：列出所有命中的标题+来源，不逐条推送。
+    """
+    ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    all_keywords = sorted({kw for _, matched in matches for kw in matched})
+
+    items_text = ""
+    for i, (item, matched) in enumerate(matches[:10], 1):
+        source_name = SOURCE_DISPLAY.get(item["source"], item["source"])
+        items_text += f"{i}. [{source_name}] {item['title'][:150]}\n"
+    if len(matches) > 10:
+        items_text += f"... 还有 {len(matches) - 10} 条\n"
+
+    msg = (
+        f"[NEWS_ALERT 触发 · 本轮 {len(matches)} 条命中 · 请处理后联系用户]\n\n"
+        f"命中关键词：{', '.join(all_keywords)}\n"
+        f"触发时间：{ts}\n\n"
+        f"命中新闻列表：\n{items_text}\n"
+        f"背景（设盘时记录）：\n{alert.get('context_summary', '（未记录）')}\n\n"
+        f"完整上下文：\n"
+        f"  文件：{alert.get('transcript_file', '未记录')}\n"
+        f"  消息ID：{alert.get('transcript_msg_id', '未记录')}\n\n"
+        f"你的任务：\n"
+        f"1. 阅读背景，结合以上新闻内容判断是否需要行动\n"
+        f"2. 以自己的口吻主动告知用户：检测到多条相关新闻\n"
+        f"3. 结合当前市场给出简要判断或建议，询问是否需要操作"
+    )
+
+    log.info(
+        f"🔔 NEWS_ALERT (batch {len(matches)}): {alert['id']} | kw={all_keywords}"
+    )
+    deliver_message(alert, msg)
 
 
 def notify_failure(agent_id: str, minutes: int) -> None:
@@ -413,9 +425,8 @@ def notify_failure(agent_id: str, minutes: int) -> None:
         f"1. 告知用户新闻监控程序取数异常\n"
         f"2. 检查网络和代理状态"
     )
-    cmd = ["openclaw", "agent", "--agent", agent_id, "--deliver",
-           "--reply-account", agent_id, "--message", msg]
-    subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    # 无具体 alert 路由，用最小路由（仅 agent_id）
+    deliver_message({"agent_id": agent_id}, msg)
 
 
 # ── 状态管理 ──────────────────────────────────────────────────────────────────
@@ -433,8 +444,8 @@ def load_state(state_file: Path) -> dict:
 def save_state(state_file: Path, state: dict) -> None:
     try:
         state_file.parent.mkdir(parents=True, exist_ok=True)
-        with open(state_file, "w") as f:
-            json.dump(state, f, indent=2, ensure_ascii=False)
+        # S-02: 原子写入状态文件
+        atomic_write_json(state_file, state)
     except Exception as e:
         log.warning(f"状态文件写入失败: {e}")
 
@@ -549,7 +560,9 @@ def run(agent_id: str, alerts_file: Path, state_file: Path) -> None:
 
             seen_hashes = set(state.get(alert_id, {}).get("seen_hashes", []))
             new_hashes: list[str] = []
-            triggered = False
+
+            # M-04: 收集本轮所有命中项，最后聚合通知
+            matches: list[tuple[dict, list[str]]] = []  # (item, matched_keywords)
 
             for src_name, items in fetched.items():
                 if src_name not in alert_srcs:
@@ -562,14 +575,12 @@ def run(agent_id: str, alerts_file: Path, state_file: Path) -> None:
                     new_hashes.append(h)
                     seen_hashes.add(h)
 
-                    # 关键词匹配
                     matched = keywords_match(item, keywords, mode)
                     if matched:
-                        fire_news_alert(alert, item, matched)
-                        triggered = True
+                        matches.append((item, matched))
                         if one_shot:
                             break
-                if triggered and one_shot:
+                if matches and one_shot:
                     break
 
             # 更新去重 hash
@@ -577,12 +588,20 @@ def run(agent_id: str, alerts_file: Path, state_file: Path) -> None:
                 update_seen_hashes(state, alert_id, new_hashes)
                 state_changed = True
 
-            # one_shot 触发后标记为 triggered
-            if triggered and one_shot:
-                alert["status"]       = "triggered"
-                alert["triggered_at"] = datetime.now().isoformat()
-                modified_alerts = True
-                log.info(f"NEWS_ALERT {alert_id} triggered (one_shot), 已标记完成")
+            # M-04: 聚合发送 — 1 条直接发，多条聚合
+            if matches:
+                if len(matches) == 1:
+                    item, matched_kws = matches[0]
+                    fire_news_alert(alert, item, matched_kws)
+                else:
+                    fire_news_alert_batch(alert, matches)
+
+                # one_shot 触发后标记为 triggered
+                if one_shot:
+                    alert["status"]       = "triggered"
+                    alert["triggered_at"] = datetime.now().isoformat()
+                    modified_alerts = True
+                    log.info(f"NEWS_ALERT {alert_id} triggered (one_shot), 已标记完成")
 
         # ── 持久化 ────────────────────────────────────────────────────────────
         if state_changed:
@@ -590,9 +609,9 @@ def run(agent_id: str, alerts_file: Path, state_file: Path) -> None:
 
         if modified_alerts:
             data["alerts"] = alerts
+            # S-02: 原子替换写入，防并发损坏
             try:
-                with open(alerts_file, "w") as f:
-                    json.dump(data, f, indent=2, ensure_ascii=False)
+                atomic_write_json(alerts_file, data)
             except Exception as e:
                 log.warning(f"写入 alerts 文件失败: {e}")
 

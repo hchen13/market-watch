@@ -14,12 +14,15 @@ price-monitor.py — 价格盯盘守护进程
 import argparse
 import json
 import logging
-import os
-import subprocess
+import sys
 import time
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
+
+# 公共工具（get_session_uuid / deliver_message / atomic_write_json）
+sys.path.insert(0, str(Path(__file__).parent))
+from common import deliver_message, atomic_write_json  # noqa: E402
 
 try:
     import requests
@@ -41,6 +44,7 @@ CRYPTO_POLL_INTERVAL = 5    # 秒
 ASTOCK_POLL_INTERVAL = 4    # 秒（盘中）
 HTTP_TIMEOUT = 5            # 秒
 FAILURE_ALERT_SEC = 600     # 连续失败10分钟告警
+PRICE_STALE_SEC = 60        # 超过此秒数的价格视为 stale，跳过触发检查
 
 # 交易所优先级（全局）
 EXCHANGE_PRIORITY = ["binance", "hyperliquid", "okx", "bitget", "coingecko"]
@@ -51,7 +55,8 @@ ASSET_EXCHANGES = {
     "ETH":  ["binance", "hyperliquid", "okx", "bitget", "coingecko"],
     "SOL":  ["binance", "hyperliquid", "okx", "bitget", "coingecko"],
     "BNB":  ["binance", "okx", "coingecko"],
-    "HYPE": ["binance", "hyperliquid", "okx", "bitget", "coingecko"],
+    # HYPE: Binance 上不存在 HYPEUSDT 交易对，从 binance 移除
+    "HYPE": ["hyperliquid", "okx", "bitget", "coingecko"],
     "XAUT": ["okx", "coingecko"],
 }
 
@@ -60,7 +65,8 @@ ASSET_EXCHANGES = {
 
 BINANCE_SYMBOL_MAP = {
     "BTC": "BTCUSDT", "ETH": "ETHUSDT", "SOL": "SOLUSDT",
-    "BNB": "BNBUSDT", "HYPE": "HYPEUSDT",
+    "BNB": "BNBUSDT",
+    # HYPE: 已验证 HYPEUSDT 在 Binance 不存在（返回 -1121 Invalid symbol）
 }
 BINANCE_REVERSE = {v: k for k, v in BINANCE_SYMBOL_MAP.items()}
 
@@ -69,17 +75,40 @@ def fetch_binance(assets: list[str]) -> dict[str, float]:
     symbols = [BINANCE_SYMBOL_MAP[a] for a in assets if a in BINANCE_SYMBOL_MAP]
     if not symbols:
         return {}
-    params = {"symbols": json.dumps(symbols)}
-    resp = requests.get(
-        "https://api.binance.com/api/v3/ticker/price",
-        params=params, timeout=HTTP_TIMEOUT,
-    )
-    resp.raise_for_status()
+
+    # 先尝试批量请求
+    try:
+        params = {"symbols": json.dumps(symbols)}
+        resp = requests.get(
+            "https://api.binance.com/api/v3/ticker/price",
+            params=params, timeout=HTTP_TIMEOUT,
+        )
+        resp.raise_for_status()
+        result = {}
+        for item in resp.json():
+            asset = BINANCE_REVERSE.get(item["symbol"])
+            if asset and float(item["price"]) > 0:
+                result[asset] = float(item["price"])
+        return result
+    except Exception as e:
+        log.debug(f"Binance 批量请求失败 ({e})，降级逐 symbol 请求")
+
+    # 批量失败 → 逐 symbol 回退（S-05：隔离单个无效 symbol 的影响）
     result = {}
-    for item in resp.json():
-        asset = BINANCE_REVERSE.get(item["symbol"])
-        if asset and float(item["price"]) > 0:
-            result[asset] = float(item["price"])
+    for sym in symbols:
+        try:
+            resp = requests.get(
+                f"https://api.binance.com/api/v3/ticker/price?symbol={sym}",
+                timeout=HTTP_TIMEOUT,
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            asset = BINANCE_REVERSE.get(data.get("symbol", ""))
+            price = float(data.get("price", 0))
+            if asset and price > 0:
+                result[asset] = price
+        except Exception:
+            continue
     return result
 
 
@@ -212,10 +241,15 @@ EXCHANGE_FETCHERS = {
 }
 
 
-def fetch_all_crypto(needed: set[str]) -> dict[str, tuple[float, str]]:
-    """按优先级从交易所获取价格，返回 {asset: (price, source)}"""
-    results: dict[str, tuple[float, str]] = {}
+def fetch_all_crypto(needed: set[str]) -> dict[str, tuple[float, str, float]]:
+    """
+    按优先级从交易所获取价格。
+    返回 {asset: (price, source, timestamp)}。
+    timestamp 为本次 fetch 开始时的 Unix 时间，用于 stale 价格检查（F-01）。
+    """
+    results: dict[str, tuple[float, str, float]] = {}
     remaining = set(needed)
+    fetch_ts = time.time()  # 本次 fetch 的统一时间戳
 
     for exchange in EXCHANGE_PRIORITY:
         if not remaining:
@@ -229,7 +263,7 @@ def fetch_all_crypto(needed: set[str]) -> dict[str, tuple[float, str]]:
         try:
             prices = fetcher(fetchable)
             for asset, price in prices.items():
-                results[asset] = (price, exchange)
+                results[asset] = (price, exchange, fetch_ts)
                 remaining.discard(asset)
         except Exception as e:
             log.debug(f"{exchange} 失败: {e}")
@@ -282,26 +316,7 @@ def fetch_astock(codes: list[str]) -> dict[str, float]:
 
 # ── 通知 ──────────────────────────────────────────────────────────────────────
 
-def get_session_uuid(session_key: str, agent_id: str) -> Optional[str]:
-    try:
-        result = subprocess.run(
-            ["openclaw", "sessions", "--agent", agent_id, "--json"],
-            capture_output=True, text=True, timeout=10,
-        )
-        data = json.loads(result.stdout)
-        for s in data.get("sessions", []):
-            if s.get("key") == session_key:
-                return s.get("sessionId")
-    except Exception:
-        pass
-    return None
-
-
 def fire_alert(alert: dict, price: float, source: str) -> None:
-    agent_id      = alert.get("agent_id", "laok")
-    session_key   = alert.get("session_key", "")
-    reply_channel = alert.get("reply_channel", "feishu")
-    reply_to      = alert.get("reply_to", "")
     ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
     msg = (
@@ -320,24 +335,16 @@ def fire_alert(alert: dict, price: float, source: str) -> None:
         f"3. 结合当前市场给出简要判断，询问用户是否执行操作"
     )
 
-    session_uuid = get_session_uuid(session_key, agent_id) if session_key else None
-
-    cmd = ["openclaw", "agent", "--deliver", "--reply-account", agent_id,
-           "--reply-channel", reply_channel]
-    if reply_to:
-        cmd += ["--reply-to", reply_to]
-    if session_uuid:
-        cmd += ["--session-id", session_uuid]
-    else:
-        cmd += ["--agent", agent_id]
-    cmd += ["--message", msg]
-
     log.info(f"🔔 ALERT: {alert['asset']} @ ${price:.4g} [{source}]")
-    subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    deliver_message(alert, msg)
 
 
 def notify_failure(agent_id: str, alerts_file: Path, minutes: int) -> None:
-    """连续取价失败超过阈值，通知用户"""
+    """
+    连续取价失败超过阈值，通知 agent。
+    M-01: 使用与 fire_alert 相同的 deliver_message 通知路径，
+    路由信息从活跃警报中读取（取第一条），如无则 fallback 到 agent 默认。
+    """
     msg = (
         f"[MARKET_ALERT · 系统异常]\n\n"
         f"价格监控已连续 {minutes} 分钟无法获取任何加密货币价格。\n"
@@ -347,9 +354,19 @@ def notify_failure(agent_id: str, alerts_file: Path, minutes: int) -> None:
         f"2. 检查网络和代理状态\n"
         f"3. 尝试手动验证: curl https://api.binance.com/api/v3/ticker/price?symbol=BTCUSDT"
     )
-    cmd = ["openclaw", "agent", "--agent", agent_id, "--deliver",
-           "--reply-account", agent_id, "--message", msg]
-    subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+    # 尝试从活跃警报中读取路由信息（M-01：与 fire_alert 路径一致）
+    route_alert: dict = {"agent_id": agent_id}
+    try:
+        if alerts_file.exists():
+            data = json.loads(alerts_file.read_text())
+            active = [a for a in data.get("alerts", []) if a.get("status") == "active"]
+            if active:
+                route_alert = active[0]
+    except Exception:
+        pass
+
+    deliver_message(route_alert, msg)
 
 
 # ── 主循环 ────────────────────────────────────────────────────────────────────
@@ -397,8 +414,7 @@ def _cleanup_old_alerts(alerts_file: Path):
             kept.append(a)
         if removed:
             data["alerts"] = kept
-            with open(alerts_file, "w") as f:
-                json.dump(data, f, indent=2, ensure_ascii=False)
+            atomic_write_json(alerts_file, data)
             log.info(f"清理 {removed} 条过期警报记录（>{ALERTS_RETAIN_DAYS}天）")
     except Exception:
         pass
@@ -408,7 +424,8 @@ def run(agent_id: str, alerts_file: Path):
     _setup_logging(agent_id)
     log.info(f"=== price-monitor start | agent={agent_id} | interval={CRYPTO_POLL_INTERVAL}s ===")
 
-    prices: dict[str, tuple[float, str]] = {}  # asset → (price, source)
+    # F-01: prices 字典加时间戳，格式 {asset: (price, source, timestamp)}
+    prices: dict[str, tuple[float, str, float]] = {}
     last_astock = 0.0
     last_log = 0.0
     last_cleanup = 0.0
@@ -436,7 +453,8 @@ def run(agent_id: str, alerts_file: Path):
         all_active = [a for a in alerts if a.get("status") == "active"]
         if not all_active:
             log.info("无活跃警报，守护进程自动退出")
-            pid_file = Path(f"/tmp/market-watch-{agent_id}.pid")
+            # S-01: 使用新格式 PID 文件（与 daemon.sh 一致）
+            pid_file = Path(f"/tmp/market-watch-{agent_id}-price.pid")
             pid_file.unlink(missing_ok=True)
             return
 
@@ -474,7 +492,8 @@ def run(agent_id: str, alerts_file: Path):
             last_astock = now
             astock_prices = fetch_astock(astock_needed)
             for code, price in astock_prices.items():
-                prices[code] = (price, "pytdx")
+                # F-01: A股价格也加时间戳
+                prices[code] = (price, "pytdx", time.time())
 
         # ── 定期清理过期警报 ──
         if now - last_cleanup >= ALERTS_CLEANUP_INTERVAL:
@@ -484,7 +503,10 @@ def run(agent_id: str, alerts_file: Path):
         # ── 定期日志 ──
         if now - last_log >= 60:
             last_log = now
-            snap = " | ".join(f"{a}=${p[0]:,.4g}[{p[1]}]" for a, p in sorted(prices.items()))
+            snap = " | ".join(
+                f"{a}=${p[0]:,.4g}[{p[1]}] age={int(now-p[2])}s"
+                for a, p in sorted(prices.items())
+            )
             log.info(f"Prices: {snap or '(无数据)'}")
             log.info(f"Active: {len(active)} alerts")
 
@@ -500,7 +522,17 @@ def run(agent_id: str, alerts_file: Path):
             price_info = prices.get(asset)
             if not price_info:
                 continue
-            current_price, source = price_info
+
+            current_price, source, price_ts = price_info
+
+            # F-01: 价格时效校验 — stale 价格跳过触发，避免假警报
+            age = time.time() - price_ts
+            if age > PRICE_STALE_SEC:
+                log.warning(
+                    f"Stale price for {asset} ({int(age)}s old, limit={PRICE_STALE_SEC}s), "
+                    f"skipping alert check"
+                )
+                continue
 
             target = float(alert["target_price"])
             condition = alert["condition"]
@@ -521,8 +553,8 @@ def run(agent_id: str, alerts_file: Path):
 
         if modified:
             data["alerts"] = alerts
-            with open(alerts_file, "w") as f:
-                json.dump(data, f, indent=2, ensure_ascii=False)
+            # S-02: 原子替换写入，防并发损坏
+            atomic_write_json(alerts_file, data)
 
         # ── 等待下一轮 ──
         elapsed = time.time() - cycle_start

@@ -32,8 +32,10 @@ register-news-alert.py — 注册新闻关键词警报
 
 import argparse
 import json
+import os
 import subprocess
 import sys
+import tempfile
 from datetime import datetime
 from pathlib import Path
 
@@ -169,8 +171,13 @@ def main() -> str:
 
     data["alerts"].append(alert)
 
-    with open(alerts_path, "w") as f:
+    # S-02: 原子替换写入，防并发损坏
+    with tempfile.NamedTemporaryFile(
+        "w", dir=str(alerts_path.parent), delete=False, suffix=".tmp", encoding="utf-8",
+    ) as f:
         json.dump(data, f, indent=2, ensure_ascii=False)
+        tmp = f.name
+    os.replace(tmp, str(alerts_path))
 
     # 统计
     active_count = sum(1 for a in data["alerts"] if a.get("status") == "active")

@@ -21,7 +21,9 @@ register-price-alert.py — 注册价格警报
 
 import argparse
 import json
+import os
 import sys
+import tempfile
 from datetime import datetime
 from pathlib import Path
 from uuid import uuid4
@@ -57,6 +59,8 @@ def main() -> str:
     parser.add_argument("--target",           required=True,     type=float, help="目标价格")
     parser.add_argument("--one-shot",         action="store_true", default=True,
                         help="触发一次后自动停止（默认 true）")
+    parser.add_argument("--no-one-shot",      dest="one_shot", action="store_false",
+                        help="持续监控，触发后不停止")
     parser.add_argument("--context-summary",  default="",        help="设盘时的上下文摘要")
     parser.add_argument("--session-key",      default="",        help="当前 session key（稳定标识）")
     parser.add_argument("--reply-channel",    default="feishu",  help="通知渠道")
@@ -108,8 +112,13 @@ def main() -> str:
 
     data["alerts"].append(alert)
 
-    with open(alerts_path, "w") as f:
+    # S-02: 原子替换写入，防并发损坏
+    with tempfile.NamedTemporaryFile(
+        "w", dir=str(alerts_path.parent), delete=False, suffix=".tmp", encoding="utf-8",
+    ) as f:
         json.dump(data, f, indent=2, ensure_ascii=False)
+        tmp = f.name
+    os.replace(tmp, str(alerts_path))
 
     # 统计活跃警报数量
     active_count = sum(1 for a in data["alerts"] if a.get("status") == "active")

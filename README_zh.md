@@ -115,7 +115,7 @@ bash "$HOME/.openclaw/skills/market-watch/scripts/install-watchdog.sh" install -
 
 | 交易所 | 协议 | 支持资产 | 延迟 |
 |--------|------|---------|------|
-| Binance | HTTP ticker（5s 轮询） | BTC, ETH, SOL, BNB, HYPE | ~100ms |
+| Binance | HTTP ticker（5s 轮询） | BTC, ETH, SOL, BNB | ~100ms |
 | Hyperliquid | HTTP allMids（5s 轮询） | HYPE + 全部 HL 上线资产 | ~100ms |
 | OKX | HTTP ticker（5s 轮询） | BTC, ETH, SOL, XAUT, HYPE | ~100ms |
 | Bitget | HTTP ticker（5s 轮询） | BTC, ETH, SOL, HYPE | ~100ms |
@@ -124,7 +124,7 @@ bash "$HOME/.openclaw/skills/market-watch/scripts/install-watchdog.sh" install -
 
 **取价优先级（逐级降级）：**
 - BTC / ETH / SOL：Binance → Hyperliquid → OKX → Bitget → CoinGecko
-- HYPE：Hyperliquid → Binance → OKX → Bitget → CoinGecko
+- HYPE：Hyperliquid → OKX → Bitget → CoinGecko（Binance 无 HYPEUSDT 交易对）
 - XAUT：OKX → CoinGecko
 - A 股（如 `601899`）：仅 pytdx（交易时段：周一至周五 9:30–11:30 / 13:00–15:00）
 
