@@ -14,27 +14,31 @@ Exchange symbol maps are fetched automatically at startup and refreshed hourly �
 
 ## See It in Action
 
-**Tuesday, 11 PM.** You're about to call it a night, but ETH has been creeping up all day. You've been planning to take profit at $2,150 and rotate into HYPE. You don't want to stay up staring at charts.
+### Price Alert
+
+**Friday night.** BTC is hovering around $67K. You think a dip below $65K could be a good entry — but you're not going to set a limit order and hope for the best. Last time BTC hit that level during a crash, the people who blindly bought got buried for six months. You don't need auto-execution. You need someone to wake you up and tell you what's happening.
 
 You tell your agent:
 
-> "Watch ETH for me. When it crosses $2,150, wake me up — I'm selling 3.5 ETH and putting $7,500 into HYPE."
+> "Alert me if BTC drops below 65K. I want to add to my position, but check what's going on first — if it's panic selling it might keep dumping, if it's just a technical pullback I'll buy."
 
-Your agent registers the alert and the daemon starts polling Binance in the background. You go to sleep.
+Three days later, 4 AM. BTC hits $64,800. The daemon catches it. Your agent wakes up — but instead of just saying "price alert", it checks the latest news, funding rates, and liquidation data, then messages you:
 
-**Wednesday, 3:47 AM.** ETH spikes to $2,163 during an Asian session rally. The daemon catches it instantly. Your agent wakes up, reads the context you set 5 hours ago, and pings you on Feishu:
+> "BTC broke below 65K, now at $64,800. Quick read on the situation: triggered by a $120M cascading liquidation on Binance, funding rate has flipped negative, no fundamental catalyst. Looks like a technical shakeout, not a trend reversal. Per your plan, this could be a good entry for that 0.1 BTC you wanted to add."
 
-> "ETH just broke $2,163. Time to sell your 3.5 ETH — that's ~$7,570 at current price. Want to rotate all of it into HYPE, or split between HYPE and BTC?"
+### News Alert
 
-You pick up your phone, see the message, and execute the trade before the price fades. No chart-watching. No missed moves.
+**Week three of the war.** You're holding gold, and the entire thesis depends on the war premium staying intact. You're not worried about the fighting continuing — you're worried about a sudden ceasefire that sends gold down 5% before you can react.
 
----
+You tell your agent:
 
-**Same idea, different signal.** It's not just prices — you can watch for news too.
+> "Watch for any ceasefire or peace negotiation news. But don't send me every headline that mentions 'ceasefire' — diplomats say that word ten times a day and nothing happens. Only alert me if it looks like real progress."
 
-> "Monitor for any SEC announcements about crypto ETFs. Check Jin10 and CoinDesk."
+Two days later, a flash headline drops: *"Iran's Supreme Leader sends message to US via Swiss back-channel, signaling willingness to make concessions on the Strait of Hormuz."*
 
-Five minutes later, a Jin10 flash hits: *"SEC Commissioner signals openness to spot ETH ETF approval."* Your agent catches the keyword match, reads the full headline, and messages you with context — before crypto Twitter even picks it up.
+The daemon catches the keyword match. Your agent reads the full article, thinks about it, and decides: this isn't the usual diplomatic boilerplate — a specific back-channel, a specific concession on Hormuz. This is substantive. It messages you:
+
+> "Intercepted something that could affect your gold position. Iran signaling real concessions on Hormuz via Swiss back-channel — this isn't the usual 'calls for peace' noise. If confirmed, war premium could unwind fast. You might want to take some profit on gold while the price still reflects the risk premium."
 
 ---
 
