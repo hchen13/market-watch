@@ -16,8 +16,10 @@ price-monitor.py — 价格盯盘守护进程
 import argparse
 import json
 import logging
+import os
 import sys
 import time
+import traceback
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
@@ -31,6 +33,28 @@ try:
 except ImportError:
     print("需要 requests: pip3 install requests")
     exit(1)
+
+# ── Proxy 配置 ────────────────────────────────────────────────────────────────
+# 从环境变量读取代理配置，有则用，无则裸连。
+# 支持标准 HTTPS_PROXY / HTTP_PROXY / ALL_PROXY 环境变量。
+# 也支持 MARKET_WATCH_PROXY 作为本项目专用配置（优先级最高）。
+
+def _get_proxy_config() -> dict:
+    """返回 requests 可用的 proxies 字典。无代理时返回空字典。"""
+    proxy_url = (
+        os.environ.get("MARKET_WATCH_PROXY")
+        or os.environ.get("HTTPS_PROXY")
+        or os.environ.get("https_proxy")
+        or os.environ.get("HTTP_PROXY")
+        or os.environ.get("http_proxy")
+        or os.environ.get("ALL_PROXY")
+        or os.environ.get("all_proxy")
+    )
+    if proxy_url:
+        return {"http": proxy_url, "https": proxy_url}
+    return {}
+
+REQUEST_PROXIES = _get_proxy_config()
 
 # ── Logging ───────────────────────────────────────────────────────────────────
 
@@ -72,7 +96,7 @@ def _build_binance_symbols() -> dict[str, str]:
     """从 Binance exchangeInfo 构建 base_asset → BTCUSDT 映射（仅 USDT 交易对）。"""
     resp = requests.get(
         "https://api.binance.com/api/v3/exchangeInfo",
-        timeout=15,
+        proxies=REQUEST_PROXIES, timeout=15,
     )
     resp.raise_for_status()
     result = {}
@@ -86,7 +110,7 @@ def _build_okx_symbols() -> dict[str, str]:
     """从 OKX public/instruments 构建 baseCcy → BTC-USDT 映射（仅 USDT SPOT live）。"""
     resp = requests.get(
         "https://www.okx.com/api/v5/public/instruments?instType=SPOT",
-        timeout=15,
+        proxies=REQUEST_PROXIES, timeout=15,
     )
     resp.raise_for_status()
     result = {}
@@ -100,7 +124,7 @@ def _build_bitget_symbols() -> dict[str, str]:
     """从 Bitget spot/public/symbols 构建 baseCoin → BTCUSDT 映射（仅 USDT online）。"""
     resp = requests.get(
         "https://api.bitget.com/api/v2/spot/public/symbols",
-        timeout=15,
+        proxies=REQUEST_PROXIES, timeout=15,
     )
     resp.raise_for_status()
     result = {}
@@ -115,7 +139,7 @@ def _build_hyperliquid_assets() -> set[str]:
     resp = requests.post(
         "https://api.hyperliquid.xyz/info",
         json={"type": "allMids"},
-        timeout=15,
+        proxies=REQUEST_PROXIES, timeout=15,
     )
     resp.raise_for_status()
     return set(resp.json().keys())
@@ -246,7 +270,7 @@ def fetch_binance(assets: list[str]) -> dict[str, float]:
         params = {"symbols": json.dumps(symbols)}
         resp = requests.get(
             "https://api.binance.com/api/v3/ticker/price",
-            params=params, timeout=HTTP_TIMEOUT,
+            params=params, proxies=REQUEST_PROXIES, timeout=HTTP_TIMEOUT,
         )
         resp.raise_for_status()
         result = {}
@@ -264,7 +288,7 @@ def fetch_binance(assets: list[str]) -> dict[str, float]:
         try:
             resp = requests.get(
                 f"https://api.binance.com/api/v3/ticker/price?symbol={sym}",
-                timeout=HTTP_TIMEOUT,
+                proxies=REQUEST_PROXIES, timeout=HTTP_TIMEOUT,
             )
             resp.raise_for_status()
             data = resp.json()
@@ -283,7 +307,7 @@ def fetch_binance(assets: list[str]) -> dict[str, float]:
 def fetch_hyperliquid(assets: list[str]) -> dict[str, float]:
     resp = requests.post(
         "https://api.hyperliquid.xyz/info",
-        json={"type": "allMids"}, timeout=HTTP_TIMEOUT,
+        json={"type": "allMids"}, proxies=REQUEST_PROXIES, timeout=HTTP_TIMEOUT,
     )
     resp.raise_for_status()
     mids = resp.json()  # {"BTC": "69500.5", "ETH": "2025.3", ...}
@@ -313,7 +337,7 @@ def fetch_okx(assets: list[str]) -> dict[str, float]:
         try:
             resp = requests.get(
                 f"https://www.okx.com/api/v5/market/ticker?instId={inst}",
-                timeout=HTTP_TIMEOUT,
+                proxies=REQUEST_PROXIES, timeout=HTTP_TIMEOUT,
             )
             resp.raise_for_status()
             data = resp.json().get("data", [])
@@ -339,7 +363,7 @@ def fetch_bitget(assets: list[str]) -> dict[str, float]:
         try:
             resp = requests.get(
                 f"https://api.bitget.com/api/v2/spot/market/tickers?symbol={sym}",
-                timeout=HTTP_TIMEOUT,
+                proxies=REQUEST_PROXIES, timeout=HTTP_TIMEOUT,
             )
             resp.raise_for_status()
             data = resp.json().get("data", [])
@@ -367,7 +391,7 @@ def fetch_coingecko(assets: list[str]) -> dict[str, float]:
 
     resp = requests.get(
         f"https://api.coingecko.com/api/v3/simple/price?ids={ids_str}&vs_currencies=usd",
-        timeout=HTTP_TIMEOUT,
+        proxies=REQUEST_PROXIES, timeout=HTTP_TIMEOUT,
     )
     resp.raise_for_status()
     data = resp.json()
@@ -572,7 +596,8 @@ def _cleanup_old_alerts(alerts_file: Path):
 
 def run(agent_id: str, alerts_file: Path):
     _setup_logging(agent_id)
-    log.info(f"=== price-monitor start | agent={agent_id} | interval={CRYPTO_POLL_INTERVAL}s ===")
+    proxy_status = REQUEST_PROXIES.get("https", "无（裸连）")
+    log.info(f"=== price-monitor start | agent={agent_id} | interval={CRYPTO_POLL_INTERVAL}s | proxy={proxy_status} ===")
 
     # ── 启动时加载交易对列表（确保在开始检查警报前完成）──
     log.info("Loading exchange symbol maps (this may take a few seconds)...")
@@ -590,6 +615,7 @@ def run(agent_id: str, alerts_file: Path):
     failure_notified = False
 
     while True:
+      try:
         cycle_start = time.time()
 
         # ── 定期刷新交易对列表（非强制，仅 TTL 到期后才刷新）──
@@ -722,6 +748,15 @@ def run(agent_id: str, alerts_file: Path):
         elapsed = time.time() - cycle_start
         sleep_time = max(0.5, CRYPTO_POLL_INTERVAL - elapsed)
         time.sleep(sleep_time)
+
+      except KeyboardInterrupt:
+        log.info("收到中断信号，正常退出")
+        return
+      except Exception as e:
+        # 顶层异常捕获：记录完整 traceback 后继续运行，不静默崩溃
+        log.error(f"主循环异常: {type(e).__name__}: {e}")
+        log.error(traceback.format_exc())
+        time.sleep(CRYPTO_POLL_INTERVAL)  # 避免异常时紧密循环
 
 
 # ── 入口 ──────────────────────────────────────────────────────────────────────
