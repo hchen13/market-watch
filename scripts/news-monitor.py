@@ -48,6 +48,25 @@ except ImportError:
     print("需要 requests: pip3 install requests")
     exit(1)
 
+import os as _os
+
+# ── Proxy 配置 ────────────────────────────────────────────────────────────────
+# 从环境变量读取代理。MARKET_WATCH_PROXY 优先，其次标准变量，无则裸连。
+def _get_proxy_config() -> dict:
+    proxy_url = (
+        _os.environ.get("MARKET_WATCH_PROXY")
+        or _os.environ.get("HTTPS_PROXY")
+        or _os.environ.get("https_proxy")
+        or _os.environ.get("HTTP_PROXY")
+        or _os.environ.get("http_proxy")
+        or _os.environ.get("ALL_PROXY")
+        or _os.environ.get("all_proxy")
+    )
+    if proxy_url:
+        return {"http": proxy_url, "https": proxy_url}
+    return {}
+REQUEST_PROXIES = _get_proxy_config()
+
 # ── Logging ────────────────────────────────────────────────────────────────────
 
 log = logging.getLogger("news-monitor")
@@ -135,7 +154,7 @@ def fetch_jin10() -> list[dict]:
     """
     url = "https://www.jin10.com/flash_newest.js"
     try:
-        resp = requests.get(url, headers=JIN10_HEADERS, timeout=HTTP_TIMEOUT)
+        resp = requests.get(url, headers=JIN10_HEADERS, proxies=REQUEST_PROXIES, timeout=HTTP_TIMEOUT)
         resp.raise_for_status()
         text = resp.text.strip()
 
@@ -201,7 +220,7 @@ def fetch_wallstreetcn() -> list[dict]:
     url = "https://api-one.wallstcn.com/apiv1/content/lives"
     params = {"channel": "global-channel", "limit": 20}
     try:
-        resp = requests.get(url, headers=WALLST_HEADERS, params=params, timeout=HTTP_TIMEOUT)
+        resp = requests.get(url, headers=WALLST_HEADERS, params=params, proxies=REQUEST_PROXIES, timeout=HTTP_TIMEOUT)
         resp.raise_for_status()
         data = resp.json()
 
@@ -251,7 +270,7 @@ def fetch_rss(source_name: str, feed_url: str) -> list[dict]:
     """
     headers = {**RSS_HEADERS, "Referer": feed_url}
     try:
-        resp = requests.get(feed_url, headers=headers, timeout=HTTP_TIMEOUT)
+        resp = requests.get(feed_url, headers=headers, proxies=REQUEST_PROXIES, timeout=HTTP_TIMEOUT)
         resp.raise_for_status()
 
         # 解析 XML
