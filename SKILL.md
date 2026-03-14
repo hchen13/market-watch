@@ -2,7 +2,6 @@
 name: "market-watch"
 version: "1.2.1"
 description: "Market monitoring and alert system for prices and news. Use when the user asks to watch a price, monitor market conditions, get notified when an asset hits a target, or keep an eye on breaking news. Covers any USDT-paired crypto and A-shares (real-time via TongDaXin)."
-repository: "https://github.com/hchen13/market-watch"
 ---
 
 # Market Watch Skill
