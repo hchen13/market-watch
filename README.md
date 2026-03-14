@@ -9,6 +9,8 @@ Watch any USDT-paired crypto price and Chinese A-shares via HTTP polling. Monito
 Exchange symbol maps are fetched automatically at startup and refreshed hourly — any asset listed on Binance, Hyperliquid, OKX, Bitget, or CoinGecko is supported out of the box with no code changes.
 
 > Built as an [OpenClaw](https://github.com/openclaw) AgentSkill. Works out of the box with any OpenClaw agent.
+>
+> **GitHub**: [hchen13/market-watch](https://github.com/hchen13/market-watch) · **ClawHub**: `clawhub install market-watch`
 
 ---
 
