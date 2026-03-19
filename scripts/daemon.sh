@@ -95,9 +95,18 @@ try:
         if a.get("type", "price") == "price":
             print(f"    · [价格] {a['asset']} {a['condition']} {a['target_price']}  [{a.get('context_summary','')[:40]}]")
         else:
-            kw = ', '.join(a.get('keywords', [])[:4])
+            raw_kw = a.get('keywords', [])[:4]
+            # combo 模式: keywords 是 list[list[str]]
+            kw_parts = []
+            for k in raw_kw:
+                if isinstance(k, list):
+                    kw_parts.append('+'.join(k))
+                else:
+                    kw_parts.append(str(k))
+            kw = ', '.join(kw_parts)
             srcs = ', '.join(a.get('sources', [])[:3])
-            print(f"    · [新闻] {kw}  [{srcs}]  [{a.get('context_summary','')[:30]}]")
+            mode = a.get('keyword_mode', 'any')
+            print(f"    · [新闻|{mode}] {kw}  [{srcs}]  [{a.get('context_summary','')[:30]}]")
     if len(active) > 10:
         print(f"    ... 还有 {len(active)-10} 个")
 except Exception as e:

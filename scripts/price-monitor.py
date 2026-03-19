@@ -762,6 +762,12 @@ def run(agent_id: str, alerts_file: Path):
 # ── 入口 ──────────────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
+    # Detach from parent process group so launchd watchdog won't kill us
+    try:
+        os.setpgrp()
+    except OSError:
+        pass
+
     parser = argparse.ArgumentParser(description="Price Monitor")
     parser.add_argument("--agent", default="laok")
     parser.add_argument("--alerts-file", default="")

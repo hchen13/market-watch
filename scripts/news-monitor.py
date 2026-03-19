@@ -188,7 +188,13 @@ def fetch_jin10() -> list[dict]:
         items = []
         for item in raw_list:
             item_id = str(item.get("id", "")).strip()
-            content = _strip_html(item.get("content", "") or item.get("body", "")).strip()
+            # 兼容新旧格式：content 可能在顶层或嵌套在 data 字段内
+            _data = item.get("data", {}) if isinstance(item.get("data"), dict) else {}
+            content = _strip_html(
+                item.get("content", "")
+                or _data.get("content", "")
+                or item.get("body", "")
+            ).strip()
             if not item_id or not content:
                 continue
             items.append({
@@ -346,18 +352,39 @@ def fetch_rss(source_name: str, feed_url: str) -> list[dict]:
 
 # ── 关键词匹配 ─────────────────────────────────────────────────────────────────
 
-def keywords_match(item: dict, keywords: list[str], mode: str) -> list[str]:
+def keywords_match(item: dict, keywords, mode: str) -> list[str]:
     """
     返回命中的关键词列表（空列表 = 未命中）。
     大小写不敏感，支持中英文。
-    mode: "any"（任一命中即返回）| "all"（全部命中才返回）
+
+    mode:
+      "any"   — keywords: list[str]，任一命中即返回
+      "all"   — keywords: list[str]，全部命中才返回
+      "combo" — keywords: list[list[str]]，OR-of-ANDs
+                每个子列表是一个 combo（组内全部命中才算该 combo 命中），
+                任意一个 combo 命中即触发。
+                返回首个命中 combo 的所有关键词。
     """
     text = (item.get("title", "") + " " + item.get("content", "")).lower()
-    matched = [kw for kw in keywords if kw.strip() and kw.strip().lower() in text]
+
+    if mode == "combo":
+        # keywords 是二维数组: [["伊朗", "谈判"], ["Iran", "negotiate"], ["ceasefire"], ...]
+        for combo in keywords:
+            if not isinstance(combo, list):
+                # 兼容：如果混入了字符串，当作单词 combo
+                combo = [combo]
+            terms = [t.strip().lower() for t in combo if isinstance(t, str) and t.strip()]
+            if terms and all(t in text for t in terms):
+                return ["/".join(combo)]  # 返回命中的 combo 作为标识
+        return []
+
+    # 原有逻辑：any / all（keywords 是 list[str]）
+    flat = keywords if isinstance(keywords, list) else []
+    matched = [kw for kw in flat if isinstance(kw, str) and kw.strip() and kw.strip().lower() in text]
     if mode == "any":
         return matched
     else:  # "all"
-        return matched if len(matched) == len([kw for kw in keywords if kw.strip()]) else []
+        return matched if len(matched) == len([kw for kw in flat if isinstance(kw, str) and kw.strip()]) else []
 
 
 # ── 通知 ──────────────────────────────────────────────────────────────────────
@@ -592,8 +619,12 @@ def run(agent_id: str, alerts_file: Path, state_file: Path) -> None:
 
         for alert in news_active:
             alert_id   = alert["id"]
-            keywords   = [kw.strip() for kw in alert.get("keywords", []) if kw.strip()]
+            keywords   = alert.get("keywords", [])
             mode       = alert.get("keyword_mode", "any")
+            # combo 模式: keywords 是 list[list[str]]，不做 strip 展平
+            # any/all 模式: keywords 是 list[str]，兼容旧格式
+            if mode != "combo":
+                keywords = [kw.strip() for kw in keywords if isinstance(kw, str) and kw.strip()]
             alert_srcs = set(alert.get("sources", ALL_SOURCES))
             one_shot   = alert.get("one_shot", False)
 
@@ -679,6 +710,13 @@ def run(agent_id: str, alerts_file: Path, state_file: Path) -> None:
 # ── 入口 ──────────────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
+    # Detach from parent process group so launchd watchdog won't kill us
+    try:
+        import os as _os
+        _os.setpgrp()
+    except OSError:
+        pass
+
     parser = argparse.ArgumentParser(description="News Monitor Daemon")
     parser.add_argument("--agent",       default="laok",  help="Agent ID")
     parser.add_argument("--alerts-file", default="",      help="自定义 alerts 文件路径")
