@@ -36,25 +36,33 @@ def get_session_uuid(session_key: str, agent_id: str) -> Optional[str]:
 
 def deliver_message(alert: dict, msg: str) -> None:
     """
-    通过 openclaw agent --deliver 发送通知。
-    路由参数从 alert 字典中读取（agent_id / session_key / reply_channel / reply_to）。
+    通过 openclaw agent 注入消息到 agent session（不自动投递）。
+
+    链路：news-monitor/price-monitor 命中 → 注入 agent main session →
+    agent 精筛判断 → agent 自行决定是否用 message 工具通知用户。
+
+    不使用 --deliver：避免 NO_REPLY 等 agent 内部响应被自动推送到用户飞书。
+    路由到 agent main session（--agent），不绑定用户 DM session。
     """
     agent_id      = alert.get("agent_id", "laok")
-    session_key   = alert.get("session_key", "")
     reply_channel = alert.get("reply_channel", "feishu")
     reply_to      = alert.get("reply_to", "")
 
-    session_uuid = get_session_uuid(session_key, agent_id) if session_key else None
+    # 注入到 agent main session，由 agent 决定是否联系用户
+    # prompt 中包含 reply_channel/reply_to 信息供 agent 使用 message 工具时参考
+    enriched_msg = msg
+    if reply_channel and reply_to:
+        enriched_msg += (
+            f"\n\n[投递信息]\n"
+            f"如需通知用户，请使用 message 工具：\n"
+            f"  channel: {reply_channel}\n"
+            f"  accountId: {agent_id}\n"
+            f"  target: {reply_to}\n"
+        )
 
-    cmd = ["openclaw", "agent", "--deliver", "--reply-account", agent_id,
-           "--reply-channel", reply_channel]
-    if reply_to:
-        cmd += ["--reply-to", reply_to]
-    if session_uuid:
-        cmd += ["--session-id", session_uuid]
-    else:
-        cmd += ["--agent", agent_id]
-    cmd += ["--message", msg]
+    cmd = ["openclaw", "agent",
+           "--agent", agent_id,
+           "--message", enriched_msg]
 
     subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
