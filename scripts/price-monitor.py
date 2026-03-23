@@ -20,9 +20,10 @@ import os
 import sys
 import time
 import traceback
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
+from zoneinfo import ZoneInfo
 
 # 公共工具（get_session_uuid / deliver_message / atomic_write_json）
 sys.path.insert(0, str(Path(__file__).parent))
@@ -68,6 +69,7 @@ _formatter = logging.Formatter("[%(asctime)s] %(message)s", datefmt="%H:%M:%S")
 
 CRYPTO_POLL_INTERVAL = 5    # 秒
 ASTOCK_POLL_INTERVAL = 4    # 秒（盘中）
+USSTOCK_POLL_INTERVAL = 30  # 秒（美股，Yahoo Finance 有频率限制）
 HTTP_TIMEOUT = 5            # 秒
 FAILURE_ALERT_SEC = 600     # 连续失败10分钟告警
 PRICE_STALE_SEC = 60        # 超过此秒数的价格视为 stale，跳过触发检查
@@ -462,6 +464,91 @@ def is_astock_trading_hours() -> bool:
     return (930 <= hm <= 1130) or (1300 <= hm <= 1500)
 
 
+# ── 交易时段判断（美股 / 期货）──────────────────────────────────────────────
+
+_TZ_ET = ZoneInfo("America/New_York")   # 美东（自动处理夏令时）
+_TZ_LONDON = ZoneInfo("Europe/London")  # 伦敦（布伦特原油 ICE）
+_TZ_CHICAGO = ZoneInfo("America/Chicago")  # 芝加哥（NYMEX/COMEX）
+
+# 休市期间降频因子：轮询间隔乘以该系数
+MARKET_CLOSED_POLL_MULTIPLIER = 12  # 休市时降频到正常的 1/12（美股 30s→360s）
+# 开盘前提前恢复高频（秒）
+PREOPEN_BUFFER_SEC = 5 * 60  # 开盘前 5 分钟恢复正常频率
+
+
+def _now_in(tz: ZoneInfo) -> datetime:
+    return datetime.now(timezone.utc).astimezone(tz)
+
+
+def is_usstock_trading_hours() -> bool:
+    """
+    美股正式交易时段：周一~周五 09:30–16:00 美东时间。
+    不含盘前（04:00–09:30）和盘后（16:00–20:00）——Yahoo Finance 盘前/盘后
+    数据波动大、流动性低，止损逻辑通常以盘中价为准。
+    如需支持盘前/盘后，可将 hm 范围改为 (400, 2000)。
+    """
+    now = _now_in(_TZ_ET)
+    if now.weekday() >= 5:
+        return False
+    hm = now.hour * 100 + now.minute
+    return 930 <= hm < 1600
+
+
+def is_usstock_near_open() -> bool:
+    """开盘前 5 分钟内，恢复高频轮询。"""
+    now = _now_in(_TZ_ET)
+    if now.weekday() >= 5:
+        return False
+    hm = now.hour * 100 + now.minute
+    return 925 <= hm < 930
+
+
+def is_futures_trading_hours(market: str) -> bool:
+    """
+    期货市场交易时段判断。
+    - brent / crude_brent / oil_brent：ICE 布伦特，周一 01:00 ~ 周五 23:00 伦敦时间
+    - wti / crude_wti / oil_wti / nymex：NYMEX WTI，周日 18:00 ~ 周五 17:00 美中时间
+    - gold / xau_futures / comex：COMEX 黄金，周日 18:00 ~ 周五 17:00 美中时间
+    对于未列出的期货市场，保守返回 True（不限制）。
+    """
+    m = market.lower()
+    if m in ("brent", "crude_brent", "oil_brent"):
+        now = _now_in(_TZ_LONDON)
+        wd = now.weekday()  # 0=周一
+        if wd == 5:  # 周六全天关闭
+            return False
+        if wd == 6:  # 周日 01:00 开盘
+            return now.hour >= 1
+        if wd == 4:  # 周五 23:00 收盘
+            return now.hour < 23
+        return True  # 周一~周四全天
+
+    if m in ("wti", "crude_wti", "oil_wti", "nymex", "gold", "xau_futures", "comex"):
+        now = _now_in(_TZ_CHICAGO)
+        wd = now.weekday()
+        if wd == 5:  # 周六全天关闭
+            return False
+        if wd == 6:  # 周日 18:00 开盘
+            return now.hour >= 18
+        if wd == 4:  # 周五 17:00 收盘
+            return now.hour < 17
+        return True  # 周一~周四全天
+
+    # 未识别的期货市场：不限制
+    return True
+
+
+def get_usstock_poll_multiplier() -> int:
+    """
+    返回美股轮询频率乘数：
+    - 正在交易或即将开盘（5min 内）→ 1（正常频率）
+    - 其他时段 → MARKET_CLOSED_POLL_MULTIPLIER（降频）
+    """
+    if is_usstock_trading_hours() or is_usstock_near_open():
+        return 1
+    return MARKET_CLOSED_POLL_MULTIPLIER
+
+
 def fetch_astock(codes: list[str]) -> dict[str, float]:
     if not codes or not is_astock_trading_hours():
         return {}
@@ -486,6 +573,42 @@ def fetch_astock(codes: list[str]) -> dict[str, float]:
         except Exception:
             continue
     return {}
+
+
+# ── 美股 Yahoo Finance ────────────────────────────────────────────────────────
+
+def fetch_usstock(symbols: list[str]) -> dict[str, tuple[float, str, float]]:
+    """
+    通过 Yahoo Finance HTTP API 批量获取美股/ETF 实时价格。
+    API: https://query1.finance.yahoo.com/v8/finance/chart/{symbol}?range=1d&interval=1m
+    解析 meta.regularMarketPrice（盘中实时价或盘后最新价）。
+    返回 {symbol: (price, "yahoo", timestamp)}，串行请求，每个间隔 100ms。
+    """
+    if not symbols:
+        return {}
+    results: dict[str, tuple[float, str, float]] = {}
+    fetch_ts = time.time()
+    for sym in symbols:
+        try:
+            resp = requests.get(
+                f"https://query1.finance.yahoo.com/v8/finance/chart/{sym}",
+                params={"range": "1d", "interval": "1m"},
+                headers={
+                    "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36",
+                    "Accept": "application/json",
+                },
+                proxies=REQUEST_PROXIES,
+                timeout=HTTP_TIMEOUT,
+            )
+            resp.raise_for_status()
+            meta = resp.json().get("chart", {}).get("result", [{}])[0].get("meta", {})
+            price = float(meta.get("regularMarketPrice", 0))
+            if price > 0:
+                results[sym] = (price, "yahoo", fetch_ts)
+        except Exception as e:
+            log.debug(f"Yahoo Finance 取价失败 {sym}: {e}")
+        time.sleep(0.1)  # 避免触发频率限制
+    return results
 
 
 # ── 通知 ──────────────────────────────────────────────────────────────────────
@@ -609,6 +732,7 @@ def run(agent_id: str, alerts_file: Path):
     # F-01: prices 字典加时间戳，格式 {asset: (price, source, timestamp)}
     prices: dict[str, tuple[float, str, float]] = {}
     last_astock = 0.0
+    last_usstock = 0.0
     last_log = 0.0
     last_cleanup = 0.0
     consecutive_fail_since: Optional[float] = None
@@ -647,12 +771,16 @@ def run(agent_id: str, alerts_file: Path):
         # ── 收集需要的资产 ──
         crypto_needed: set[str] = set()
         astock_needed: list[str] = []
+        usstock_needed: list[str] = []
         for a in active:
             asset = a["asset"].upper()
             market = a.get("market", "crypto")
             if market == "astock":
                 if asset not in astock_needed:
                     astock_needed.append(asset)
+            elif market == "usstock":
+                if asset not in usstock_needed:
+                    usstock_needed.append(asset)
             else:
                 crypto_needed.add(asset)
 
@@ -681,6 +809,18 @@ def run(agent_id: str, alerts_file: Path):
                 # F-01: A股价格也加时间戳
                 prices[code] = (price, "pytdx", time.time())
 
+        # ── 取价：美股（Yahoo Finance，30s 间隔）──
+        usstock_multiplier = get_usstock_poll_multiplier()
+        usstock_effective_interval = USSTOCK_POLL_INTERVAL * usstock_multiplier
+        if usstock_needed and now - last_usstock >= usstock_effective_interval:
+            last_usstock = now
+            if is_usstock_trading_hours() or is_usstock_near_open():
+                usstock_prices = fetch_usstock(usstock_needed)
+                prices.update(usstock_prices)
+            else:
+                # 休市期间不拉价格，只打一条 debug 日志
+                log.debug(f"美股休市，跳过拉价格（下次检查 {usstock_effective_interval}s 后）")
+
         # ── 定期清理过期警报 ──
         if now - last_cleanup >= ALERTS_CLEANUP_INTERVAL:
             last_cleanup = now
@@ -706,6 +846,12 @@ def run(agent_id: str, alerts_file: Path):
 
             if market == "astock" and not is_astock_trading_hours():
                 continue
+            if market == "usstock" and not (is_usstock_trading_hours() or is_usstock_near_open()):
+                continue
+            if market in ("brent", "crude_brent", "oil_brent", "wti", "crude_wti",
+                          "oil_wti", "nymex", "gold", "xau_futures", "comex"):
+                if not is_futures_trading_hours(market):
+                    continue
 
             price_info = prices.get(asset)
             if not price_info:

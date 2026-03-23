@@ -142,6 +142,7 @@ bash "$HOME/.openclaw/skills/market-watch/scripts/install-watchdog.sh" install -
 | Bitget | HTTP ticker (polling 5s) | All USDT SPOT (dynamic) | ~100ms |
 | CoinGecko | HTTP polling (30s fallback) | Universal fallback (dynamic) | ~30s |
 | pytdx | TCP request-response | A-shares (Shanghai/Shenzhen) | ~200ms |
+| Yahoo Finance | HTTP chart API (30s polling) | US stocks & ETFs (e.g. EWY, SPY, QQQ) | ~1s |
 
 **Symbol discovery:** Exchange symbol maps are fetched at startup from the exchanges' own public APIs and refreshed every hour. No hardcoded symbol tables — any USDT-paired asset is automatically supported.
 
@@ -150,6 +151,14 @@ bash "$HOME/.openclaw/skills/market-watch/scripts/install-watchdog.sh" install -
 - HYPE: Hyperliquid → OKX → Bitget → CoinGecko (no HYPEUSDT on Binance)
 - XAUT: OKX → CoinGecko
 - A-shares (e.g. `600519`): pytdx only (market hours: Mon–Fri 9:30–11:30 / 13:00–15:00 CST)
+- US stocks/ETFs (e.g. `EWY`, `SPY`): Yahoo Finance only (regular hours: Mon–Fri 9:30–16:00 ET; DST-aware)
+
+**Market hours awareness:** The monitor is market-hours-aware — it skips price fetching and alert checks when the relevant exchange is closed:
+- **A-shares:** Mon–Fri 9:30–11:30 / 13:00–15:00 CST
+- **US stocks/ETFs:** Mon–Fri 9:25–16:00 ET (includes 5-min pre-open warmup); polling rate drops 12× when closed (30s → 360s)
+- **Brent crude (ICE):** Mon 01:00 – Fri 23:00 London time; closed Saturday
+- **WTI / Gold futures (NYMEX/COMEX):** Sun 18:00 – Fri 17:00 Chicago time; closed Saturday
+- **Crypto:** 24/7, no restrictions
 
 ### News Sources
 
@@ -315,6 +324,24 @@ This skill ships with a `SKILL.md` that is automatically loaded by the OpenClaw 
 **Any crypto asset:**
 - If the asset has a USDT pair on Binance, OKX, or Bitget, or is listed on Hyperliquid / CoinGecko, it's automatically supported — no code changes needed
 - Exchange symbol maps refresh every hour; a daemon restart is only needed if you want to pick up a very recently listed coin without waiting for the next hourly refresh
+
+**US stocks and ETFs (`--market usstock`):**
+- Supported: any ticker on Yahoo Finance (e.g. `EWY`, `SPY`, `QQQ`, `NVDA`)
+- The monitor is market-hours-aware: price fetching and alert checks are **automatically skipped** outside NYSE/NASDAQ trading hours (Mon–Fri 9:30–16:00 ET)
+- When the US market is closed, the polling rate drops automatically from 30s to 360s — no wasted API calls
+- Daylight Saving Time is handled automatically
+
+**Commodity futures (`--market brent`, `wti`, `gold`, etc.):**
+- `brent` / `crude_brent` / `oil_brent` → ICE (London), Mon 01:00 – Fri 23:00 London time
+- `wti` / `crude_wti` / `oil_wti` / `nymex` → NYMEX (Chicago), Sun 18:00 – Fri 17:00 CT
+- `gold` / `xau_futures` / `comex` → COMEX (Chicago), same schedule as WTI
+- For unlisted futures markets, the monitor defaults to 24/7 (no restriction)
+
+**Guiding your user through setup:**
+1. Start the daemon: `bash ~/.openclaw/skills/market-watch/scripts/daemon.sh start --agent {agent_id}`
+2. Register an alert: `python3 register-price-alert.py --asset EWY --market usstock --condition "<=" --target 120 --context "stop-loss trigger"`
+3. Verify it's running: check `/tmp/market-watch-{agent}.log` — you should see `Prices: EWY=$xxx[yahoo]` entries during market hours
+4. macOS users can install the launchd watchdog so the daemon auto-restarts after reboots: `bash ~/.openclaw/skills/market-watch/scripts/install-watchdog.sh --agent {agent_id}`
 
 ---
 

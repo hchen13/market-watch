@@ -1,7 +1,7 @@
 ---
 name: "market-watch"
 version: "1.2.1"
-description: "Market monitoring and alert system for prices and news. Use when the user asks to watch a price, monitor market conditions, get notified when an asset hits a target, or keep an eye on breaking news. Covers any USDT-paired crypto and A-shares (real-time via TongDaXin)."
+description: "Market monitoring and alert system for prices and news. Use when the user asks to watch a price, monitor market conditions, get notified when an asset hits a target, or keep an eye on breaking news. Covers any USDT-paired crypto, A-shares (real-time via TongDaXin), and US stocks/ETFs (Yahoo Finance)."
 ---
 
 # Market Watch Skill
@@ -27,6 +27,7 @@ description: "Market monitoring and alert system for prices and news. Use when t
 | Bitget | HTTP ticker（5s 轮询） | 任意 USDT SPOT（动态发现） | ~100ms |
 | pytdx | TCP 轮询（盘中 4s） | A股（沪深） | ~200ms |
 | CoinGecko | HTTP 轮询（30s） | 全资产 fallback（动态发现） | 30s |
+| Yahoo Finance | HTTP chart API（30s 轮询） | 美股、ETF（如 EWY、SPY、QQQ） | ~1s |
 
 **动态交易对发现：** 守护进程启动时自动从各交易所拉取完整交易对列表，每小时刷新一次。任意 USDT 交易对的加密货币均自动支持，无需手动添加 symbol 映射。
 
@@ -75,7 +76,7 @@ description: "Market monitoring and alert system for prices and news. Use when t
 ```json
 {
   "asset":        "ETH",
-  "market":       "crypto",    // "crypto" | "astock"
+  "market":       "crypto",    // "crypto" | "astock" | "usstock"
   "condition":    ">=",        // >= | <= | > | <
   "target_price": 2150
 }
@@ -113,7 +114,7 @@ python3 "$SKILL/register-price-alert.py" \
 ```
 
 **参数说明：**
-- `--market`: `crypto`（加密）或 `astock`（A股，代码如 `600519`）
+- `--market`: `crypto`（加密）、`astock`（A股，代码如 `600519`）或 `usstock`（美股/ETF，如 `EWY`、`SPY`、`QQQ`）
 - `--condition`: `>=` / `<=` / `>` / `<`
 - `--session-key`: 用户的当前 session key（稳定标识，用于触发时找到正确 session）
 - `--reply-to`: 飞书通知目标，格式 `user:ou_xxx`
@@ -239,7 +240,12 @@ python3 "$SKILL/cancel-alert.py" --agent laok --all             # 取消全部
 - **交易对列表刷新**：启动时自动拉取，每小时刷新一次；如某个交易所加载失败，保留上次缓存继续运行
 - **HYPE**: 优先用 Hyperliquid HTTP（allMids 含 HYPE 现货 mid price）→ OKX → Bitget → CoinGecko
 - **XAUT**: 仅 OKX 有，可能因地区限制失败，CoinGecko 兜底
-- **A股**: 只在交易时段（9:30-11:30 / 13:00-15:00）轮询，非交易时段自动跳过
+- **A股**: 只在交易时段（9:30-11:30 / 13:00-15:00 北京时间）轮询，非交易时段自动跳过
+- **美股/ETF**: 只在美东时间 09:25–16:00（含 5 分钟开盘预热）拉价格和触发警报；休市期间轮询频率自动降为正常的 1/12（30s→360s），不浪费请求；夏令时自动处理
+- **期货市场时段感知**:
+  - `brent` / `crude_brent` / `oil_brent`（ICE 布伦特）：周一 01:00 ~ 周五 23:00 伦敦时间，周六全天关闭
+  - `wti` / `crude_wti` / `oil_wti` / `nymex` / `gold` / `xau_futures` / `comex`：周日 18:00 ~ 周五 17:00 美中时间，周六全天关闭
+  - 其他期货市场未列出时保守处理（不限制，全天监控）
 - **金十/华尔街见闻**: 非官方接口，接口变更时 monitor 会静默跳过，不影响 RSS 源继续工作
 - **新闻警报默认持续监控**：不会自动停止，需要手动 cancel 或设置 `--one-shot`
 - **价格警报默认一次性触发**：触发后标记 triggered，停止监控
